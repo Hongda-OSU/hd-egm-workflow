@@ -41,5 +41,13 @@ section before implementing a feature; do not invent fields or flows.
 
 - `codex` / `claude` read `AGENTS.md` / `CLAUDE.md` from the working dir, which
   is why goldfish must run in an empty temp dir, not the repo.
+- The PRD's codex flags alone do NOT isolate a goldfish (parent `AGENTS.md`,
+  shell reads, web search and Notion apps all leak). Use the full invocation
+  in `agent_docs/codex-goldfish.md`.
 - Notion API returns block JSON; Markdown conversion is ours. Unsupported
   blocks must leave a visible placeholder line, never be dropped silently.
+
+## Read these only when relevant
+
+- `agent_docs/codex-goldfish.md` — measured `codex exec` isolation flags,
+  probe results, cost; read before touching goldfish invocation code.
