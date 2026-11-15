@@ -1,0 +1,45 @@
+# HD EGM Workflow
+
+Local-only Mac desktop app for cross-model PRD review: Claude is the elephant
+(writes the PRD), GPT goldfish with zero context review it, `claude -p` triages,
+the user decides. It must never write to Notion.
+
+Spec (source of truth): Notion page "HD EGM Workflow · 产品文档"
+https://app.notion.com/p/40660d3cf9f381088712e6e662bb0f2c — read the relevant
+section before implementing a feature; do not invent fields or flows.
+
+## Stack
+
+- Tauri 2 + Rust backend; Svelte 5 + Vite + TypeScript frontend
+- Package manager: **pnpm** (not npm, not yarn)
+- Rust crates already chosen: `tokio::process` (CLI calls), `reqwest` (Notion),
+  `serde`, `keyring` (Notion token), `similar` (snapshot diff)
+- No Python, no Electron, no database, no cloud, no API keys
+- Goldfish = `codex exec` (ChatGPT login); triager = `claude -p` (subscription)
+
+## Rules
+
+- Notion access is **read-only**. Never add code that creates or updates
+  Notion pages; the interactive Claude elephant is the only PRD writer.
+- Never auto-accept or auto-apply review issues; the triager only advises.
+- Each goldfish runs in a fresh temp dir with `--ephemeral
+  --ignore-user-config --ignore-rules --skip-git-repo-check` and a read-only
+  sandbox; prompt + PRD go in via stdin. Do not weaken this isolation.
+- Strip the PRD's "关键决策清单" section before goldfish see it; only the
+  triager gets it.
+- Run data lives in `~/hd-egm-runs/<prd-slug>/round-<N>/`; never overwrite
+  an earlier round's files.
+- Output schemas live in `schemas/` (one per goldfish, passed to
+  `--output-schema`); prompt templates live in `prompts/`. Keep field names
+  identical to the spec's data model (§7).
+- The Notion token lives in the macOS keychain only — never in files, logs,
+  or test fixtures.
+- Milestone gate: no UI work (M4+) until M3 produces a useful `triage.json`.
+- Ask before adding a new dependency.
+
+## Gotchas
+
+- `codex` / `claude` read `AGENTS.md` / `CLAUDE.md` from the working dir, which
+  is why goldfish must run in an empty temp dir, not the repo.
+- Notion API returns block JSON; Markdown conversion is ours. Unsupported
+  blocks must leave a visible placeholder line, never be dropped silently.
