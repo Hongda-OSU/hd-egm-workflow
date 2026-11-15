@@ -43,6 +43,9 @@ pub struct RoundState {
     pub fish: BTreeMap<String, Step>,
     pub triage: Step,
     pub warnings: Vec<String>,
+    /// Recomputed after triage and after every decision (PRD §6.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdicts: Option<crate::review::RoundVerdicts>,
 }
 
 /// Directory name: ASCII slug of the title + first 8 chars of the page id.
@@ -93,6 +96,31 @@ pub fn read_state(round_dir: &Path) -> Result<RoundState> {
 
 pub fn write_state(round_dir: &Path, state: &RoundState) -> Result<()> {
     write_json(&round_dir.join("round.json"), state)
+}
+
+/// Steps left "running" by a crash or quit become "failed" so the PRD is not
+/// blocked forever; the author reruns them (PRD §6.3). Call at app start.
+pub fn recover_stale(data_dir: &Path) -> Result<usize> {
+    let mut fixed = 0;
+    let Ok(prds) = fs::read_dir(data_dir) else { return Ok(0) };
+    for prd in prds.flatten().filter(|e| e.path().is_dir()) {
+        let Some(round_dir) = latest_round(&prd.path()) else { continue };
+        let Ok(mut state) = read_state(&round_dir) else { continue };
+        let mut changed = false;
+        for step in state.fish.values_mut().chain(std::iter::once(&mut state.triage)) {
+            if step.status == "running" {
+                step.status = "failed".into();
+                step.error = Some("interrupted: the app exited while this was running".into());
+                changed = true;
+            }
+        }
+        if changed {
+            state.stage = "failed".into();
+            write_state(&round_dir, &state)?;
+            fixed += 1;
+        }
+    }
+    Ok(fixed)
 }
 
 /// The highest-numbered `round-N` dir of a PRD.
@@ -252,6 +280,7 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str) -> Result
         fish: FISH.iter().map(|f| (f.to_string(), Step::queued())).collect(),
         triage: Step::queued(),
         warnings: warnings.clone(),
+        verdicts: None,
     };
     write_json(&tmp.join("round.json"), &state)?;
 

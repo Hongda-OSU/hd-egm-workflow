@@ -29,16 +29,17 @@ async fn run_round(settings: &Settings, round_dir: &Path) -> Result<()> {
 fn print_summary(r: &RoundResult) {
     let t = &r.triage;
     let v = |x: Verdict| if x == Verdict::Go { "GO" } else { "NO-GO" };
+    let rv = &r.verdicts;
     let count = |f: &dyn Fn(&egm_core::model::Issue) -> bool| t.issues.iter().filter(|i| f(i)).count();
     println!("\nround {} -> {}", t.round, r.dir.join("triage.json").display());
     println!(
         "  retell {} (key decisions {}/{} = {:.0}%), critic {}, ready {}",
-        v(t.verdicts.retell),
+        v(rv.retell),
         t.key_decision_hits,
         t.key_decision_total,
         t.hit_rate() * 100.0,
-        v(t.verdicts.critic),
-        v(t.verdicts.ready)
+        v(rv.critic),
+        v(rv.ready)
     );
     println!(
         "  issues {} (high {}, medium {}, low {}); advice accept {}, reject {}; previously rejected {}",

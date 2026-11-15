@@ -29,14 +29,14 @@ Follow the triage rules in the user's message and return only the structured res
 pub struct RoundResult {
     pub dir: PathBuf,
     pub triage: Triage,
+    /// App-computed (PRD §6.6), not the triager's own pre-decision guess.
+    pub verdicts: crate::review::RoundVerdicts,
     pub warnings: Vec<String>,
 }
 
 impl RoundResult {
-    /// PRD §6.6: all three lines GO and no block-conversion warnings.
     pub fn overall_go(&self) -> bool {
-        let v = &self.triage.verdicts;
-        [v.retell, v.critic, v.ready].iter().all(|x| *x == Verdict::Go) && self.warnings.is_empty()
+        self.verdicts.prd == Verdict::Go
     }
 }
 
@@ -109,9 +109,12 @@ async fn run_fish(name: &'static str, prompt: String, schema: &'static str, cfg:
 }
 
 /// Rejected issues of all earlier rounds (PRD §6.6), from each round's
-/// triage.json + decisions.json.
+/// triage.json + decisions.json. A rejection drops out again when a later
+/// round matched an issue to it (`rejected_as`) and the author accepted that
+/// issue: the author changed their mind.
 pub fn collect_rejections(prd_dir: &Path, current: u32) -> Result<Vec<Rejection>> {
     let mut out = Vec::new();
+    let mut overturned = Vec::new();
     for k in 1..current {
         let dir = prd_dir.join(format!("round-{k}"));
         let (Ok(t), Ok(d)) = (fs::read_to_string(dir.join("triage.json")), fs::read_to_string(dir.join("decisions.json"))) else {
@@ -119,18 +122,22 @@ pub fn collect_rejections(prd_dir: &Path, current: u32) -> Result<Vec<Rejection>
         };
         let triage: Triage = serde_json::from_str(&t)?;
         let decisions: Vec<Decision> = serde_json::from_str(&d)?;
-        for dec in decisions.iter().filter(|d| d.decision == Advice::Reject) {
-            if let Some(i) = triage.issues.iter().find(|i| i.id == dec.issue_id) {
-                out.push(Rejection {
+        for dec in &decisions {
+            let Some(i) = triage.issues.iter().find(|i| i.id == dec.issue_id) else { continue };
+            match (dec.decision, &i.rejected_as) {
+                (Advice::Reject, _) => out.push(Rejection {
                     id: i.id.clone(),
                     section: i.section.clone(),
                     title: i.title.clone(),
                     problem: i.problem.clone(),
                     note: dec.note.clone(),
-                });
+                }),
+                (Advice::Accept, Some(prev)) => overturned.push(prev.clone()),
+                (Advice::Accept, None) => {}
             }
         }
     }
+    out.retain(|r| !overturned.contains(&r.id));
     Ok(out)
 }
 
@@ -270,6 +277,9 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
                 state.triage.status = "done".into();
                 state.stage = "decide".into();
                 write_state(round_dir, &state)?;
+                // First verdicts right away, so a round needing no decision
+                // still reaches a conclusion (PRD §6.6).
+                state.verdicts = Some(crate::review::refresh_verdicts(round_dir)?);
                 log("triage: done".into());
             }
             Err(e) => {
@@ -283,7 +293,11 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
     }
 
     let triage: Triage = serde_json::from_str(&read(&triage_path)?)?;
-    Ok(RoundResult { dir: round_dir.to_path_buf(), triage, warnings: state.warnings })
+    let verdicts = match state.verdicts {
+        Some(v) => v,
+        None => crate::review::refresh_verdicts(round_dir)?,
+    };
+    Ok(RoundResult { dir: round_dir.to_path_buf(), triage, verdicts, warnings: state.warnings })
 }
 
 #[cfg(test)]
