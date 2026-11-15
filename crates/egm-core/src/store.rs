@@ -80,9 +80,32 @@ pub fn read_meta(prd_dir: &Path) -> Option<PrdMeta> {
     serde_json::from_str(&text).ok()
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     fs::write(path, serde_json::to_string_pretty(value)? + "\n")?;
     Ok(())
+}
+
+pub fn read_state(round_dir: &Path) -> Result<RoundState> {
+    let path = round_dir.join("round.json");
+    let text = fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    Ok(serde_json::from_str(&text)?)
+}
+
+pub fn write_state(round_dir: &Path, state: &RoundState) -> Result<()> {
+    write_json(&round_dir.join("round.json"), state)
+}
+
+/// The highest-numbered `round-N` dir of a PRD.
+pub fn latest_round(prd_dir: &Path) -> Option<PathBuf> {
+    fs::read_dir(prd_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let n: u32 = e.file_name().to_str()?.strip_prefix("round-")?.parse().ok()?;
+            Some((n, e.path()))
+        })
+        .max_by_key(|(n, _)| *n)
+        .map(|(_, p)| p)
 }
 
 pub struct PrdEntry {
@@ -112,10 +135,10 @@ pub async fn list(notion: &Notion, settings: &Settings) -> Result<Vec<PrdEntry>>
 }
 
 /// Held while a round is being written; one round per PRD at a time.
-struct Lock(PathBuf);
+pub struct Lock(PathBuf);
 
 impl Lock {
-    fn acquire(prd_dir: &Path) -> Result<Self> {
+    pub fn acquire(prd_dir: &Path) -> Result<Self> {
         let path = prd_dir.join(".lock");
         fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {

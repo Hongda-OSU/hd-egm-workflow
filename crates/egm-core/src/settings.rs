@@ -14,6 +14,38 @@ pub struct Settings {
     pub project_page_id: String,
     /// Rule page name -> Notion page id; `null` for pages not written yet.
     pub rule_pages: BTreeMap<String, Option<String>>,
+    /// Dedicated codex login for goldfish (agent_docs/codex-goldfish.md).
+    #[serde(default = "default_codex_home")]
+    pub codex_home: String,
+    #[serde(default = "default_goldfish_model")]
+    pub goldfish_model: String,
+    #[serde(default = "default_goldfish_effort")]
+    pub goldfish_effort: String,
+    #[serde(default = "default_triager_model")]
+    pub triager_model: String,
+}
+
+fn default_codex_home() -> String {
+    "~/Library/Application Support/hd-egm-workflow/codex-home".into()
+}
+
+fn default_goldfish_model() -> String {
+    "gpt-6.1-sol".into()
+}
+
+fn default_goldfish_effort() -> String {
+    "medium".into()
+}
+
+fn default_triager_model() -> String {
+    "claude-opus-5-5".into()
+}
+
+fn expand(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => home().join(rest),
+        None => PathBuf::from(path),
+    }
 }
 
 pub fn home() -> PathBuf {
@@ -34,9 +66,10 @@ impl Settings {
     }
 
     pub fn data_dir(&self) -> PathBuf {
-        match self.data_dir.strip_prefix("~/") {
-            Some(rest) => home().join(rest),
-            None => PathBuf::from(&self.data_dir),
-        }
+        expand(&self.data_dir)
+    }
+
+    pub fn codex_home(&self) -> PathBuf {
+        expand(&self.codex_home)
     }
 }

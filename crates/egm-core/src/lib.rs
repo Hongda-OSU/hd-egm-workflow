@@ -1,9 +1,12 @@
 //! Core of HD EGM Workflow: Notion pulling, Markdown conversion and round
 //! storage. Shared by the CLI now and the Tauri app later.
 
+pub mod agents;
 pub mod markdown;
+pub mod model;
 pub mod notion;
 pub mod prd;
+pub mod round;
 pub mod settings;
 pub mod store;
 
