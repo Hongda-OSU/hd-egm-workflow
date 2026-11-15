@@ -12,10 +12,24 @@ section before implementing a feature; do not invent fields or flows.
 
 - Tauri 2 + Rust backend; Svelte 5 + Vite + TypeScript frontend
 - Package manager: **pnpm** (not npm, not yarn)
-- Rust crates already chosen: `tokio::process` (CLI calls), `reqwest` (Notion),
-  `serde`, `keyring` (Notion token), `similar` (snapshot diff)
+- Rust 2024 workspace: `crates/egm-core` (logic, shared with the future
+  Tauri app) + `crates/egm-cli` (binary `egm`, used until M4)
+- Crates: `tokio`, `reqwest` (rustls), `serde`; `similar` comes with M5
 - No Python, no Electron, no database, no cloud, no API keys
 - Goldfish = `codex exec` (ChatGPT login); triager = `claude -p` (subscription)
+- Settings: `~/Library/Application Support/hd-egm-workflow/settings.json`
+  (page ids only); run data: `~/hd-egm-runs/`
+
+## Commands
+
+| Purpose | Command |
+| --- | --- |
+| Build | `cargo build` |
+| All tests | `cargo test` |
+| Lint | `cargo clippy --all-targets` |
+| List PRDs | `./target/debug/egm list` |
+| Pull a round | `./target/debug/egm pull <page-id>` |
+| Page as Markdown | `./target/debug/egm convert <page-id>` |
 
 ## Rules
 
@@ -46,6 +60,10 @@ section before implementing a feature; do not invent fields or flows.
   in `agent_docs/codex-goldfish.md`.
 - Notion API returns block JSON; Markdown conversion is ours. Unsupported
   blocks must leave a visible placeholder line, never be dropped silently.
+- Read the token with `/usr/bin/security find-generic-password` (service
+  `hd-egm-workflow`, account `notion`). Do not switch to the `keyring` crate:
+  every rebuild changes the binary's signature and the keychain prompts again.
+- Run `cargo clippy --all-targets` and `cargo test` before every commit.
 
 ## Read these only when relevant
 
