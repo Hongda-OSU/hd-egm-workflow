@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "triage",
+  "description": "Triager output (PRD §7.3). Optional PRD fields are required here but nullable, so structured output stays strict. key_decision_hits / key_decision_total are filled in by the app from key_decisions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdicts", "key_decisions", "spec_checks", "issues"],
+  "properties": {
+    "verdicts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retell", "critic", "ready"],
+      "properties": {
+        "retell": { "type": "string", "enum": ["GO", "NO-GO"] },
+        "critic": { "type": "string", "enum": ["GO", "NO-GO"] },
+        "ready": { "type": "string", "enum": ["GO", "NO-GO"] }
+      }
+    },
+    "key_decisions": {
+      "type": "array",
+      "description": "One entry per item of the key-decision list, in order.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["item", "result"],
+        "properties": {
+          "item": { "type": "string" },
+          "result": { "type": "string", "enum": ["hit", "partial", "miss"] }
+        }
+      }
+    },
+    "spec_checks": {
+      "type": "array",
+      "description": "Copied from the spec goldfish, one entry per checklist item.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["item", "pass"],
+        "properties": {
+          "item": { "type": "string" },
+          "pass": { "type": "boolean" }
+        }
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id", "source", "also_from", "refs", "rejected_as", "severity", "section",
+          "title", "problem", "impact", "advice", "reason", "suggested_change"
+        ],
+        "properties": {
+          "id": { "type": "string", "description": "r<round>-<two digits>, e.g. r2-03" },
+          "source": { "type": "string", "enum": ["retell", "critic", "ready"] },
+          "also_from": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["retell", "critic", "ready"] }
+          },
+          "refs": {
+            "type": "array",
+            "description": "Original goldfish entries, e.g. critic#3 (0-based index).",
+            "items": { "type": "string" }
+          },
+          "rejected_as": {
+            "type": ["string", "null"],
+            "description": "Id of the matching earlier rejection, or null."
+          },
+          "severity": { "type": "string", "enum": ["high", "medium", "low"] },
+          "section": { "type": "string" },
+          "title": { "type": "string" },
+          "problem": { "type": "string" },
+          "impact": { "type": "string" },
+          "advice": { "type": "string", "enum": ["accept", "reject"] },
+          "reason": { "type": "string" },
+          "suggested_change": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}
