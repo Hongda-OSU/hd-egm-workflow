@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ready",
+  "description": "Ready-to-build goldfish output (PRD §7.5).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "reason", "missing"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["GO", "NO-GO"] },
+    "reason": { "type": "string" },
+    "missing": {
+      "type": "array",
+      "description": "What an implementer would need but cannot find. Empty if none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "section", "detail", "severity"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["path", "data", "interface", "error", "acceptance"]
+          },
+          "section": { "type": "string" },
+          "detail": { "type": "string" },
+          "severity": { "type": "string", "enum": ["high", "medium", "low"] }
+        }
+      }
+    }
+  }
+}

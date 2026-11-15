@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "spec",
+  "description": "Spec-compliance goldfish output (PRD §7.5). note is required when pass is false.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["checks"],
+  "properties": {
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["item", "pass", "note"],
+        "properties": {
+          "item": { "type": "string" },
+          "pass": { "type": "boolean" },
+          "note": {
+            "type": "string",
+            "description": "Empty string when pass is true; required explanation when false."
+          }
+        }
+      }
+    }
+  }
+}

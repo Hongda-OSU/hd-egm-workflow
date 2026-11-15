@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "retell",
+  "description": "Retell goldfish output (PRD §7.5).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "key_decisions", "guesses"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "The problem, architecture and data flow in the reviewer's own words."
+    },
+    "key_decisions": {
+      "type": "array",
+      "description": "Key design decisions the reviewer identified, each with its rationale.",
+      "items": { "type": "string" }
+    },
+    "guesses": {
+      "type": "array",
+      "description": "Places the PRD leaves unclear and the reviewer had to guess. Empty if none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["section", "guess", "severity"],
+        "properties": {
+          "section": { "type": "string" },
+          "guess": { "type": "string" },
+          "severity": { "type": "string", "enum": ["high", "medium", "low"] }
+        }
+      }
+    }
+  }
+}

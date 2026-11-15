@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "critic",
+  "description": "Critic goldfish output (PRD §7.5).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["issues"],
+  "properties": {
+    "issues": {
+      "type": "array",
+      "description": "Problems only; no style comments. Empty if none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["section", "problem", "impact", "severity"],
+        "properties": {
+          "section": { "type": "string" },
+          "problem": { "type": "string" },
+          "impact": { "type": "string" },
+          "severity": { "type": "string", "enum": ["high", "medium", "low"] }
+        }
+      }
+    }
+  }
+}
