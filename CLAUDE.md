@@ -29,6 +29,8 @@ section before implementing a feature; do not invent fields or flows.
 | Lint | `cargo clippy --all-targets` |
 | List PRDs | `./target/debug/egm list` |
 | Pull a round | `./target/debug/egm pull <page-id>` |
+| Full round | `./target/debug/egm run <page-id>` (uses subscription quota) |
+| Finish latest round | `./target/debug/egm resume <page-id>` |
 | Page as Markdown | `./target/debug/egm convert <page-id>` |
 
 ## Rules
@@ -69,3 +71,5 @@ section before implementing a feature; do not invent fields or flows.
 
 - `agent_docs/codex-goldfish.md` — measured `codex exec` isolation flags,
   probe results, cost; read before touching goldfish invocation code.
+- `agent_docs/claude-triager.md` — same for `claude -p`; read before
+  touching triager invocation code.
