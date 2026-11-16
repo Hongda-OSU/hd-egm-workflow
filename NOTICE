@@ -1,0 +1,13 @@
+HD EGM Workflow
+
+Parts of the review criteria in prompts/retell.md, prompts/critic.md and
+prompts/ready.md are adapted from the Elephant-Goldfish Model
+(https://github.com/google/elephant-goldfish-model, commit 72d06f5),
+Copyright 2026 Google LLC, licensed under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0). The adapted criteria are:
+the paraphrase-failure check and project-term scope (agents/comprehension.md),
+unbacked assumptions and the alternatives rule (agents/design_critic.md,
+resources/document_standards/feature-spec-standard.md), the YAGNI check
+(agents/zoom_out.md), and phase checkpoints
+(resources/document_standards/implementation-readiness-standard.md).
+They were rewritten in Chinese and changed to fit this project's rules.
