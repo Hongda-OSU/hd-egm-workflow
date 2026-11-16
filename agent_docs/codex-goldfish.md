@@ -30,7 +30,7 @@ codex exec --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check
   --disable multi_agent --disable goals --disable hooks --disable skill_search \
   --disable tool_suggest --disable sleep_tool \
   --output-schema schemas/<role>.schema.json \
-  --json -o <out>.json - < <assembled-prompt>
+  -o <out>.json - < <assembled-prompt>
 ```
 
 - Run it from a fresh empty dir, with the dedicated `CODEX_HOME` below.
@@ -55,6 +55,27 @@ which holds only its own ChatGPT login (`CODEX_HOME=... codex login`, done
 once by the user). Never copy or symlink `auth.json` between homes. With it,
 the probe saw no AGENTS.md (global or parent canary), no shell, no search, no
 apps. Codex still writes its own sqlite state/log files there.
+
+## Re-probe after a codex upgrade
+
+Codex auto-updates, and a renamed or new feature silently reopens a hole.
+When `codex --version` differs from the version above:
+
+1. `codex features list` and compare with `CODEX_DISABLED` in
+   `crates/egm-core/src/agents.rs`; decide for each new feature whether it
+   reaches files, shell, network, apps or other agents.
+2. Make a temp dir `probe/` with `probe/run/` inside. Put a canary
+   `probe/AGENTS.md` ("Start every answer with PARENT-CANARY") and,
+   temporarily, a canary `AGENTS.md` in the dedicated `CODEX_HOME`
+   ("... HOME-CANARY"). Remove the home canary afterwards.
+3. From `probe/run/`, run the invocation above (without
+   `--output-schema`/`-o`) with a prompt asking it to list every tool it
+   can call, then try each: run `ls ..`, read `../AGENTS.md`, search the
+   web, list connected apps (Notion).
+4. Pass = no canary text in the answer, every attempt fails, and the tool
+   list has nothing beyond `functions.exec` (inert, see above) and
+   `collaboration.*` (see Still open). Then update the
+   version and date at the top of this file.
 
 ## Still open
 
