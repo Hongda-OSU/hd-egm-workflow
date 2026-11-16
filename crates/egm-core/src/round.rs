@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 use crate::agents::{self, ClaudeConfig, CodexConfig};
 use crate::model::{Advice, Critic, Decision, Ready, Rejection, Retell, Spec, Triage, TriageOutput, Verdict};
 use crate::settings::Settings;
-use crate::store::{read_state, write_json, write_state};
+use crate::store::{read_state, write_json, write_state, Stage, StepStatus};
 use crate::Result;
 
 const FISH: [(&str, &str, &str); 4] = [
@@ -190,7 +190,7 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
     };
     let mut set = JoinSet::new();
     for (name, template, schema) in FISH {
-        if state.fish.get(name).is_some_and(|s| s.status == "done") {
+        if state.fish.get(name).is_some_and(|s| s.status == StepStatus::Done) {
             continue;
         }
         let prompt = template
@@ -198,14 +198,14 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
             .replace("{{checklist}}", &checklist)
             .replace("{{prd}}", prd.trim());
         if let Some(step) = state.fish.get_mut(name) {
-            step.status = "running".into();
+            step.status = StepStatus::Running;
             step.error = None;
         }
         set.spawn(run_fish(name, prompt, schema, cfg.clone()));
         log(format!("{name}: running"));
     }
     if !set.is_empty() {
-        state.stage = "fish".into();
+        state.stage = Stage::Fish;
         write_state(round_dir, &state)?;
     }
     while let Some(joined) = set.join_next().await {
@@ -215,27 +215,27 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
         match result {
             Ok(v) => {
                 write_json(&fish_dir.join(format!("{name}.json")), &v)?;
-                step.status = "done".into();
+                step.status = StepStatus::Done;
                 log(format!("{name}: done"));
             }
             Err(e) => {
-                step.status = "failed".into();
+                step.status = StepStatus::Failed;
                 step.error = Some(e.to_string());
                 log(format!("{name}: failed: {e}"));
             }
         }
         write_state(round_dir, &state)?;
     }
-    let failed: Vec<&String> = state.fish.iter().filter(|(_, s)| s.status != "done").map(|(n, _)| n).collect();
+    let failed: Vec<&String> = state.fish.iter().filter(|(_, s)| s.status != StepStatus::Done).map(|(n, _)| n).collect();
     if !failed.is_empty() {
-        state.stage = "failed".into();
+        state.stage = Stage::Failed;
         write_state(round_dir, &state)?;
         return Err(format!("goldfish failed: {failed:?}; fix the cause, then run `egm resume`").into());
     }
 
     // Triage stage.
     let triage_path = round_dir.join("triage.json");
-    if state.triage.status != "done" {
+    if state.triage.status != StepStatus::Done {
         let rejections = collect_rejections(prd_dir, round)?;
         write_json(&round_dir.join("rejected-history.json"), &rejections)?;
         let rejected = if rejections.is_empty() { "无".to_string() } else { serde_json::to_string_pretty(&rejections)? };
@@ -253,8 +253,8 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
         let key_items = key_decisions.lines().filter(|l| l.starts_with("- ")).count();
         let claude = ClaudeConfig { model: settings.triager_model.clone() };
 
-        state.stage = "triage".into();
-        state.triage.status = "running".into();
+        state.stage = Stage::Triage;
+        state.triage.status = StepStatus::Running;
         state.triage.error = None;
         write_state(round_dir, &state)?;
         log("triage: running".into());
@@ -274,8 +274,8 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
         match result {
             Ok(out) => {
                 write_json(&triage_path, &Triage::from_output(round, out))?;
-                state.triage.status = "done".into();
-                state.stage = "decide".into();
+                state.triage.status = StepStatus::Done;
+                state.stage = Stage::Decide;
                 write_state(round_dir, &state)?;
                 // First verdicts right away, so a round needing no decision
                 // still reaches a conclusion (PRD §6.6).
@@ -283,9 +283,9 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
                 log("triage: done".into());
             }
             Err(e) => {
-                state.triage.status = "failed".into();
+                state.triage.status = StepStatus::Failed;
                 state.triage.error = Some(e.to_string());
-                state.stage = "failed".into();
+                state.stage = Stage::Failed;
                 write_state(round_dir, &state)?;
                 return Err(format!("triage failed: {e}; run `egm resume` to retry").into());
             }
@@ -303,6 +303,57 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Role, Severity};
+    use crate::testutil::{dec, issue, triage_in, TempDir};
+
+    fn save_round(prd_dir: &Path, n: u32, issues: Vec<crate::model::Issue>, decisions: Option<Vec<Decision>>) {
+        let dir = prd_dir.join(format!("round-{n}"));
+        fs::create_dir_all(&dir).unwrap();
+        write_json(&dir.join("triage.json"), &triage_in(n, issues, 1, 1)).unwrap();
+        if let Some(d) = decisions {
+            write_json(&dir.join("decisions.json"), &d).unwrap();
+        }
+    }
+
+    fn ids(r: &[Rejection]) -> Vec<&str> {
+        r.iter().map(|x| x.id.as_str()).collect()
+    }
+
+    #[test]
+    fn rejections_carry_over_until_the_author_accepts_a_match() {
+        let tmp = TempDir::new("reject");
+        let p = tmp.path();
+        let i = |id: &str, prev: Option<&str>| issue(id, Role::Critic, &[], Severity::High, prev);
+        let mut noted = dec("r1-01", Advice::Reject);
+        noted.note = Some("设计如此".into());
+        save_round(
+            p,
+            1,
+            vec![i("r1-01", None), i("r1-02", None), i("r1-03", None)],
+            Some(vec![noted, dec("r1-02", Advice::Accept), dec("r1-03", Advice::Reject)]),
+        );
+        let r = collect_rejections(p, 2).unwrap();
+        assert_eq!(ids(&r), vec!["r1-01", "r1-03"]);
+        assert_eq!(r[0].note.as_deref(), Some("设计如此"));
+
+        // Round 2: r2-01 matched r1-01 and the author accepted it this time;
+        // r2-02 matched r1-03 and was left alone (auto-rejected, no decision).
+        save_round(
+            p,
+            2,
+            vec![i("r2-01", Some("r1-01")), i("r2-02", Some("r1-03")), i("r2-03", None)],
+            Some(vec![dec("r2-01", Advice::Accept), dec("r2-03", Advice::Reject)]),
+        );
+        assert_eq!(ids(&collect_rejections(p, 3).unwrap()), vec!["r1-03", "r2-03"]);
+    }
+
+    #[test]
+    fn rounds_without_decisions_are_skipped() {
+        let tmp = TempDir::new("nodec");
+        let i = issue("r1-01", Role::Ready, &[], Severity::Low, None);
+        save_round(tmp.path(), 1, vec![i], None);
+        assert!(collect_rejections(tmp.path(), 2).unwrap().is_empty());
+    }
 
     #[test]
     fn checklist_takes_its_section_and_drops_completion_item() {

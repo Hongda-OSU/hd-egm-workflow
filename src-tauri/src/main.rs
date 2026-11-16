@@ -11,7 +11,7 @@ use egm_core::model::{Advice, Decision, Triage};
 use egm_core::notion::{compact_id, Notion};
 use egm_core::review::{self, RoundVerdicts};
 use egm_core::settings::Settings;
-use egm_core::store::{self, Lock, Step};
+use egm_core::store::{self, Lock, PrdStatus, Stage, Step};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
@@ -58,7 +58,7 @@ async fn app_status() -> AppStatus {
 struct PrdItem {
     page_id: String,
     title: String,
-    status: String,
+    status: PrdStatus,
     rounds: u32,
 }
 
@@ -92,7 +92,7 @@ async fn list_prds() -> CmdResult<PrdList> {
     match listed {
         Ok(entries) => {
             for e in entries {
-                let (status, rounds) = e.meta.map_or(("none".into(), 0), |m| (m.status, m.rounds));
+                let (status, rounds) = e.meta.map_or((PrdStatus::NotReviewed, 0), |m| (m.status, m.rounds));
                 items.push(PrdItem { page_id: e.page_id, title: e.title, status, rounds });
             }
         }
@@ -135,7 +135,7 @@ fn rule_pages() -> CmdResult<Vec<RuleItem>> {
 struct RoundView {
     n: u32,
     latest: bool,
-    stage: String,
+    stage: Stage,
     fish_steps: BTreeMap<String, Step>,
     triage_step: Step,
     warnings: Vec<String>,
@@ -151,23 +151,8 @@ struct RoundView {
 struct PrdDetail {
     page_id: String,
     title: String,
-    status: String,
+    status: PrdStatus,
     rounds: Vec<RoundView>,
-}
-
-fn round_dirs(prd_dir: &Path) -> Vec<(u32, PathBuf)> {
-    let mut dirs: Vec<(u32, PathBuf)> = fs::read_dir(prd_dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter_map(|e| {
-                    let n = e.file_name().to_str()?.strip_prefix("round-")?.parse().ok()?;
-                    Some((n, e.path()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    dirs.sort_by_key(|(n, _)| *n);
-    dirs
 }
 
 fn prd_dir(settings: &Settings, page_id: &str) -> CmdResult<PathBuf> {
@@ -185,7 +170,7 @@ async fn get_prd(page_id: String) -> CmdResult<Option<PrdDetail>> {
     let settings = settings()?;
     let Some(dir) = store::find_prd_dir(&settings.data_dir(), &page_id) else { return Ok(None) };
     let meta = store::read_meta(&dir).ok_or("prd.json is missing")?;
-    let dirs = round_dirs(&dir);
+    let dirs = store::rounds(&dir);
     let last = dirs.last().map(|(n, _)| *n);
     let mut rounds = Vec::new();
     for (n, rd) in dirs {

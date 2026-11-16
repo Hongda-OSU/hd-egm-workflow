@@ -7,7 +7,7 @@ use egm_core::model::{Advice, Severity, Verdict};
 use egm_core::notion::Notion;
 use egm_core::round::{self, RoundResult};
 use egm_core::settings::Settings;
-use egm_core::store::{self, Lock};
+use egm_core::store::{self, Lock, PrdStatus};
 use egm_core::Result;
 
 const USAGE: &str = "usage:
@@ -76,7 +76,7 @@ async fn run() -> Result<()> {
             let notion = Notion::from_keychain()?;
             for e in store::list(&notion, &settings).await? {
                 let status = match &e.meta {
-                    Some(m) if m.status == "go" => format!("GO (round {})", m.rounds),
+                    Some(m) if m.status == PrdStatus::Go => format!("GO (round {})", m.rounds),
                     Some(m) => format!("round {}", m.rounds),
                     None => "not reviewed".into(),
                 };

@@ -10,6 +10,8 @@ pub mod review;
 pub mod round;
 pub mod settings;
 pub mod store;
+#[cfg(test)]
+mod testutil;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;

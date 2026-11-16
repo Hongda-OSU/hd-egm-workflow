@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Advice, Decision, Issue, Role, Severity, Triage, Verdict};
-use crate::store::{latest_round, read_meta, read_state, write_json, write_state, PrdMeta};
+use crate::store::{latest_round, read_meta, read_state, write_atomic, write_json, write_state, PrdMeta, PrdStatus, Stage};
 use crate::Result;
 
 /// Retell needs at least this share of the key-decision list (PRD §6.6).
@@ -95,7 +95,7 @@ pub fn refresh_verdicts(round_dir: &Path) -> Result<RoundVerdicts> {
     if latest_round(prd_dir).as_deref() == Some(round_dir)
         && let Some(mut meta) = read_meta(prd_dir)
     {
-        meta.status = if verdicts.prd == Verdict::Go { "go" } else { "in_review" }.into();
+        meta.status = if verdicts.prd == Verdict::Go { PrdStatus::Go } else { PrdStatus::InReview };
         write_meta(prd_dir, &meta)?;
     }
     Ok(verdicts)
@@ -221,9 +221,9 @@ pub fn write_handoff(round_dir: &Path) -> Result<String> {
     let prd_dir = round_dir.parent().ok_or("round dir has no parent")?;
     let title = read_meta(prd_dir).map(|m| m.title).unwrap_or_default();
     let md = render_handoff(&title, &triage, &decisions);
-    fs::write(round_dir.join("handoff.md"), &md)?;
+    write_atomic(&round_dir.join("handoff.md"), md.as_bytes())?;
     let mut state = read_state(round_dir)?;
-    state.stage = "done".into();
+    state.stage = Stage::Done;
     write_state(round_dir, &state)?;
     Ok(md)
 }
@@ -252,42 +252,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Hit, KeyDecision, Verdicts};
-
-    fn issue(id: &str, source: Role, also: &[Role], sev: Severity, rejected_as: Option<&str>) -> Issue {
-        Issue {
-            id: id.into(),
-            source,
-            also_from: also.to_vec(),
-            refs: vec![],
-            rejected_as: rejected_as.map(Into::into),
-            severity: sev,
-            section: "§1".into(),
-            title: format!("t-{id}"),
-            problem: "p".into(),
-            impact: "i".into(),
-            advice: Advice::Accept,
-            reason: "r".into(),
-            suggested_change: Some("c".into()),
-        }
-    }
-
-    fn triage(issues: Vec<Issue>, hits: usize, total: usize) -> Triage {
-        let key_decisions = (0..total)
-            .map(|k| KeyDecision { item: format!("k{k}"), result: if k < hits { Hit::Hit } else { Hit::Miss } })
-            .collect();
-        let out = crate::model::TriageOutput {
-            verdicts: Verdicts { retell: Verdict::NoGo, critic: Verdict::NoGo, ready: Verdict::NoGo },
-            key_decisions,
-            spec_checks: vec![],
-            issues,
-        };
-        Triage::from_output(2, out)
-    }
-
-    fn dec(id: &str, d: Advice) -> Decision {
-        Decision { issue_id: id.into(), decision: d, note: None, decided_at: "x".into() }
-    }
+    use crate::testutil::{dec, issue, triage};
 
     #[test]
     fn no_issues_and_enough_hits_is_go() {

@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -15,31 +17,62 @@ use crate::Result;
 
 pub const FISH: [&str; 4] = ["retell", "critic", "ready", "spec"];
 
+/// `prd.json` status (PRD §7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PrdStatus {
+    #[serde(rename = "none")]
+    NotReviewed,
+    #[serde(rename = "in_review")]
+    InReview,
+    #[serde(rename = "go")]
+    Go,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrdMeta {
     pub notion_page_id: String,
     pub title: String,
     pub slug: String,
     pub rounds: u32,
-    pub status: String,
+    pub status: PrdStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepStatus {
+    Queued,
+    Running,
+    Done,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
-    pub status: String,
+    pub status: StepStatus,
     pub retries: u32,
     pub error: Option<String>,
 }
 
 impl Step {
     fn queued() -> Self {
-        Step { status: "queued".into(), retries: 0, error: None }
+        Step { status: StepStatus::Queued, retries: 0, error: None }
     }
+}
+
+/// Where a round is in its lifecycle (`round.json` `stage`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    Fish,
+    Triage,
+    Decide,
+    Done,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoundState {
-    pub stage: String,
+    pub stage: Stage,
     pub fish: BTreeMap<String, Step>,
     pub triage: Step,
     pub warnings: Vec<String>,
@@ -67,15 +100,27 @@ pub fn slug(title: &str, page_id: &str) -> String {
     if s.is_empty() { id } else { format!("{s}-{id}") }
 }
 
-/// Finds the local directory of a PRD by its page id (the slug may predate
-/// a rename, so match on the id suffix).
+/// Finds the local directory of a PRD by the full page id stored in its
+/// prd.json. Not by the id in the directory name: pages created around the
+/// same time share their first 8 id characters.
 pub fn find_prd_dir(data_dir: &Path, page_id: &str) -> Option<PathBuf> {
-    let suffix: String = compact_id(page_id).chars().take(8).collect();
+    let id = compact_id(page_id);
     fs::read_dir(data_dir)
         .ok()?
         .flatten()
         .map(|e| e.path())
-        .find(|p| p.is_dir() && p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&suffix)))
+        .find(|p| read_meta(p).is_some_and(|m| compact_id(&m.notion_page_id) == id))
+}
+
+/// Directory for a PRD with no local data yet: `slug()`, or with the rest of
+/// the page id appended when another PRD already owns that name.
+fn new_prd_dir(data_dir: &Path, title: &str, page_id: &str) -> PathBuf {
+    let base = slug(title, page_id);
+    if read_meta(&data_dir.join(&base)).is_none() {
+        return data_dir.join(base);
+    }
+    let id = compact_id(page_id);
+    data_dir.join(format!("{base}-{}", id.get(8..).unwrap_or(&id)))
 }
 
 pub fn read_meta(prd_dir: &Path) -> Option<PrdMeta> {
@@ -83,9 +128,18 @@ pub fn read_meta(prd_dir: &Path) -> Option<PrdMeta> {
     serde_json::from_str(&text).ok()
 }
 
-pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    fs::write(path, serde_json::to_string_pretty(value)? + "\n")?;
+/// Writes via a temp file and a rename, so a crash never leaves a
+/// half-written file behind.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let name = path.file_name().ok_or("path has no file name")?.to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)?;
     Ok(())
+}
+
+pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    write_atomic(path, (serde_json::to_string_pretty(value)? + "\n").as_bytes())
 }
 
 pub fn read_state(round_dir: &Path) -> Result<RoundState> {
@@ -98,24 +152,29 @@ pub fn write_state(round_dir: &Path, state: &RoundState) -> Result<()> {
     write_json(&round_dir.join("round.json"), state)
 }
 
-/// Steps left "running" by a crash or quit become "failed" so the PRD is not
+/// Steps left running by a crash or quit become failed so the PRD is not
 /// blocked forever; the author reruns them (PRD §6.3). Call at app start.
+/// PRDs whose lock is held by a live process (e.g. `egm run` in a terminal)
+/// are left alone.
 pub fn recover_stale(data_dir: &Path) -> Result<usize> {
     let mut fixed = 0;
     let Ok(prds) = fs::read_dir(data_dir) else { return Ok(0) };
     for prd in prds.flatten().filter(|e| e.path().is_dir()) {
+        if lock_holder(&prd.path().join(LOCK)).is_some_and(pid_alive) {
+            continue;
+        }
         let Some(round_dir) = latest_round(&prd.path()) else { continue };
         let Ok(mut state) = read_state(&round_dir) else { continue };
         let mut changed = false;
         for step in state.fish.values_mut().chain(std::iter::once(&mut state.triage)) {
-            if step.status == "running" {
-                step.status = "failed".into();
+            if step.status == StepStatus::Running {
+                step.status = StepStatus::Failed;
                 step.error = Some("interrupted: the app exited while this was running".into());
                 changed = true;
             }
         }
         if changed {
-            state.stage = "failed".into();
+            state.stage = Stage::Failed;
             write_state(&round_dir, &state)?;
             fixed += 1;
         }
@@ -123,17 +182,25 @@ pub fn recover_stale(data_dir: &Path) -> Result<usize> {
     Ok(fixed)
 }
 
+/// The `round-N` dirs of a PRD, oldest first.
+pub fn rounds(prd_dir: &Path) -> Vec<(u32, PathBuf)> {
+    let mut out: Vec<(u32, PathBuf)> = fs::read_dir(prd_dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| {
+                    let n = e.file_name().to_str()?.strip_prefix("round-")?.parse().ok()?;
+                    Some((n, e.path()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by_key(|(n, _)| *n);
+    out
+}
+
 /// The highest-numbered `round-N` dir of a PRD.
 pub fn latest_round(prd_dir: &Path) -> Option<PathBuf> {
-    fs::read_dir(prd_dir)
-        .ok()?
-        .flatten()
-        .filter_map(|e| {
-            let n: u32 = e.file_name().to_str()?.strip_prefix("round-")?.parse().ok()?;
-            Some((n, e.path()))
-        })
-        .max_by_key(|(n, _)| *n)
-        .map(|(_, p)| p)
+    rounds(prd_dir).pop().map(|(_, p)| p)
 }
 
 pub struct PrdEntry {
@@ -162,24 +229,59 @@ pub async fn list(notion: &Notion, settings: &Settings) -> Result<Vec<PrdEntry>>
         .collect())
 }
 
-/// Held while a round is being written; one round per PRD at a time.
+const LOCK: &str = ".lock";
+
+/// Held while a round is being written; one round per PRD at a time. The
+/// file holds the owner's pid, so a lock left by a crash is taken over.
 pub struct Lock(PathBuf);
 
 impl Lock {
     pub fn acquire(prd_dir: &Path) -> Result<Self> {
-        let path = prd_dir.join(".lock");
-        fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                format!(
-                    "another round is running for this PRD (delete {} if it crashed)",
-                    path.display()
-                )
-            } else {
-                e.to_string()
-            }
-        })?;
-        Ok(Lock(path))
+        let path = prd_dir.join(LOCK);
+        if create_lock(&path)? {
+            return Ok(Lock(path));
+        }
+        if let Some(pid) = lock_holder(&path).filter(|p| pid_alive(*p)) {
+            return Err(format!(
+                "another round is running for this PRD (pid {pid}; delete {} if that is wrong)",
+                path.display()
+            )
+            .into());
+        }
+        // The owner is gone (crash or force quit).
+        let _ = fs::remove_file(&path);
+        if create_lock(&path)? {
+            return Ok(Lock(path));
+        }
+        Err("another round started for this PRD at the same moment".into())
     }
+}
+
+/// Creates the lock with our pid in one step: the pid goes into a temp file
+/// that is then hard-linked into place, so the lock never exists empty.
+fn create_lock(path: &Path) -> Result<bool> {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let tmp = path.with_file_name(format!("{LOCK}.{}.{nanos}", std::process::id()));
+    fs::write(&tmp, std::process::id().to_string())?;
+    let linked = fs::hard_link(&tmp, path);
+    let _ = fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn lock_holder(path: &Path) -> Option<u32> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+fn pid_alive(pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 impl Drop for Lock {
@@ -241,7 +343,7 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str) -> Result
     let page = notion.page(page_id).await?;
     let data_dir = settings.data_dir();
     let prd_dir = find_prd_dir(&data_dir, &page.id)
-        .unwrap_or_else(|| data_dir.join(slug(&page.title, &page.id)));
+        .unwrap_or_else(|| new_prd_dir(&data_dir, &page.title, &page.id));
     fs::create_dir_all(&prd_dir)?;
     let _lock = Lock::acquire(&prd_dir)?;
 
@@ -250,7 +352,7 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str) -> Result
         title: page.title.clone(),
         slug: prd_dir.file_name().unwrap_or_default().to_string_lossy().into_owned(),
         rounds: 0,
-        status: "none".into(),
+        status: PrdStatus::NotReviewed,
     });
     meta.title = page.title.clone();
 
@@ -276,7 +378,7 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str) -> Result
         fs::write(tmp.join("rules").join(format!("{name}.md")), &r.markdown)?;
     }
     let state = RoundState {
-        stage: "fish".into(),
+        stage: Stage::Fish,
         fish: FISH.iter().map(|f| (f.to_string(), Step::queued())).collect(),
         triage: Step::queued(),
         warnings: warnings.clone(),
@@ -287,7 +389,7 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str) -> Result
     let dir = prd_dir.join(format!("round-{round}"));
     fs::rename(&tmp, &dir)?;
     meta.rounds = round;
-    meta.status = "in_review".into();
+    meta.status = PrdStatus::InReview;
     write_json(&prd_dir.join("prd.json"), &meta)?;
     Ok(PulledRound { dir, round, warnings })
 }
@@ -295,6 +397,7 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TempDir;
 
     #[test]
     fn slug_matches_prd_example() {
@@ -307,5 +410,78 @@ mod tests {
     #[test]
     fn slug_of_non_ascii_title_is_the_id_prefix() {
         assert_eq!(slug("香港求职自动化", "36660d3cf9f381ff"), "36660d3c");
+    }
+
+    const EGM: &str = "40660d3c-f9f3-8108-8712-e6e662bb0f2c";
+    const SAME_PREFIX: &str = "40660d3c-f9f3-8140-8d00-ed34fc94ea78";
+
+    fn claim(data_dir: &Path, name: &str, page_id: &str) -> PathBuf {
+        let dir = data_dir.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let meta = PrdMeta {
+            notion_page_id: page_id.into(),
+            title: "t".into(),
+            slug: name.into(),
+            rounds: 1,
+            status: PrdStatus::InReview,
+        };
+        write_json(&dir.join("prd.json"), &meta).unwrap();
+        dir
+    }
+
+    #[test]
+    fn find_prd_dir_matches_the_full_id_not_the_prefix() {
+        let tmp = TempDir::new("find");
+        let egm = claim(tmp.path(), "hd-egm-workflow-40660d3c", EGM);
+        assert_eq!(find_prd_dir(tmp.path(), EGM), Some(egm.clone()));
+        assert_eq!(find_prd_dir(tmp.path(), &compact_id(EGM)), Some(egm));
+        assert_eq!(find_prd_dir(tmp.path(), SAME_PREFIX), None);
+    }
+
+    #[test]
+    fn new_prd_dir_avoids_a_name_owned_by_another_prd() {
+        let tmp = TempDir::new("newdir");
+        assert_eq!(new_prd_dir(tmp.path(), "香港", EGM), tmp.path().join("40660d3c"));
+        claim(tmp.path(), "40660d3c", EGM);
+        assert_eq!(
+            new_prd_dir(tmp.path(), "照片", SAME_PREFIX),
+            tmp.path().join("40660d3c-f9f381408d00ed34fc94ea78")
+        );
+        // A leftover dir without prd.json (failed first pull) is reused.
+        fs::create_dir_all(tmp.path().join("other-3e360d3c")).unwrap();
+        assert_eq!(
+            new_prd_dir(tmp.path(), "Other", "3e360d3c-f9f3-812f-9e04-e7bf96e28c20"),
+            tmp.path().join("other-3e360d3c")
+        );
+    }
+
+    #[test]
+    fn lock_is_exclusive_and_released_on_drop() {
+        let tmp = TempDir::new("lock");
+        let held = Lock::acquire(tmp.path()).unwrap();
+        assert_eq!(lock_holder(&tmp.path().join(LOCK)), Some(std::process::id()));
+        assert!(Lock::acquire(tmp.path()).is_err());
+        drop(held);
+        assert!(!tmp.path().join(LOCK).exists());
+        assert!(Lock::acquire(tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn lock_left_by_a_dead_process_is_taken_over() {
+        let tmp = TempDir::new("stale");
+        // Above the macOS pid limit, so never a live process.
+        fs::write(tmp.path().join(LOCK), "4000000").unwrap();
+        let _held = Lock::acquire(tmp.path()).unwrap();
+        assert_eq!(lock_holder(&tmp.path().join(LOCK)), Some(std::process::id()));
+    }
+
+    #[test]
+    fn write_json_leaves_no_temp_file() {
+        let tmp = TempDir::new("atomic");
+        let path = tmp.path().join("a.json");
+        write_json(&path, &[1, 2]).unwrap();
+        write_json(&path, &[3]).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "[\n  3\n]\n");
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 }
