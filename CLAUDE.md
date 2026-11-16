@@ -24,9 +24,12 @@ section before implementing a feature; do not invent fields or flows.
 
 | Purpose | Command |
 | --- | --- |
+| Install frontend deps | `pnpm install` |
+| Desktop app (dev) | `pnpm tauri dev` |
 | Build | `cargo build` |
 | All tests | `cargo test` |
 | Lint | `cargo clippy --all-targets` |
+| Frontend types | `pnpm check` |
 | List PRDs | `./target/debug/egm list` |
 | Pull a round | `./target/debug/egm pull <page-id>` |
 | Full round | `./target/debug/egm run <page-id>` (uses subscription quota) |
@@ -65,7 +68,9 @@ section before implementing a feature; do not invent fields or flows.
 - Read the token with `/usr/bin/security find-generic-password` (service
   `hd-egm-workflow`, account `notion`). Do not switch to the `keyring` crate:
   every rebuild changes the binary's signature and the keychain prompts again.
-- Run `cargo clippy --all-targets` and `cargo test` before every commit.
+- Run `cargo clippy --all-targets`, `cargo test` and `pnpm check` before
+  every commit.
+- Keep `typescript` on ^6: `svelte-check` does not support TypeScript 7 yet.
 
 ## Read these only when relevant
 
