@@ -25,6 +25,13 @@
     medium: { label: "中", color: "#a86b00" },
     low: { label: "低", color: "#5f6670" },
   };
+  const ROLE_HINT: Record<Role, string> = {
+    retell: "复述金鱼：读完用自己的话讲一遍，讲错说明 PRD 没写清楚",
+    critic: "找茬金鱼：挑照着 PRD 做会做错的地方",
+    ready: "开工金鱼：假装要照着 PRD 写代码，列出缺了什么",
+  };
+  const ROLES: Role[] = ["retell", "critic", "ready"];
+  const foundBy = (i: Issue) => ROLES.filter((r) => i.source === r || i.also_from.includes(r));
   const FISH_NAMES: Record<string, string> = { retell: "复述", critic: "找茬", ready: "开工", spec: "规范" };
   const STEP_LABEL: Record<string, string> = { queued: "排队", running: "运行中", done: "完成", failed: "失败" };
 
@@ -384,10 +391,17 @@
           <div class="panes">
             <section class="card list">
               <div class="chips">
-                {#each ["all", "retell", "critic", "ready"] as k}
-                  {@const n = k === "all" ? triage.issues.length : triage.issues.filter((i) => i.source === k || i.also_from.includes(k as Role)).length}
-                  <button type="button" class="chip" class:on={src === k} onclick={() => { src = k as typeof src; issueId = null; }}>
-                    {k === "all" ? "全部" : ROLE[k as Role].label} {n}
+                <button type="button" class="chip" class:on={src === "all"} onclick={() => { src = "all"; issueId = null; }}>
+                  全部 {triage.issues.length}
+                </button>
+                <span class="chip-sep" aria-hidden="true"></span>
+                <span class="muted small-text">谁发现的</span>
+                {#each ROLES as k}
+                  {@const n = triage.issues.filter((i) => foundBy(i).includes(k)).length}
+                  <button type="button" class="chip" class:on={src === k}
+                    title="{ROLE_HINT[k]}。一条问题可能被几条金鱼同时发现，所以这几个数加起来会比全部多"
+                    onclick={() => { src = k; issueId = null; }}>
+                    {ROLE[k].label} {n}
                   </button>
                 {/each}
               </div>
@@ -396,12 +410,14 @@
                   {@const st = stateOf(it)}
                   <button type="button" class="issue" class:on={cur?.id === it.id} onclick={() => (issueId = it.id)}>
                     <span class="issue-meta">
-                      <span class="role" style="color:{ROLE[it.source].color};background:{ROLE[it.source].bg}">{ROLE[it.source].label}{it.also_from.length ? ` +${it.also_from.length}` : ""}</span>
-                      <span class="sev" style="color:{SEV[it.severity].color}">{SEV[it.severity].label}</span>
-                      <span class="muted ellipsis">{it.section}</span>
+                      <span class="sev" style="color:{SEV[it.severity].color}" title="严重度">{SEV[it.severity].label}</span>
+                      {#each foundBy(it) as r}
+                        <span class="role" style="color:{ROLE[r].color};background:{ROLE[r].bg}" title={ROLE_HINT[r]}>{ROLE[r].label}</span>
+                      {/each}
                       <span class="state" style="color:{st.color}">{st.text}</span>
                     </span>
                     <span class="issue-title">{it.title}</span>
+                    <span class="issue-sections muted">{it.section.split(/\s*[；;]\s*/).join(" · ")}</span>
                   </button>
                 {:else}
                   <p class="muted center-text">这一类没有问题。</p>
@@ -610,11 +626,15 @@
   .issues { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; }
   .issue { width: 100%; display: flex; flex-direction: column; gap: 6px; padding: 12px; margin-bottom: 6px; text-align: left; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 8px; color: #1f2328; cursor: pointer; }
   .issue.on { background: #f4f5f8; border-color: #4a5a7a; }
-  .issue-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; font-size: 11px; }
+  .issue-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; width: 100%; font-size: 11px; }
+  .issue-meta .sev { margin-right: 4px; }
+  .issue-sections { font-size: 11px; line-height: 1.5; }
+  .chips { align-items: center; }
+  .chip-sep { width: 1px; height: 18px; margin: 0 4px; background: rgba(0,0,0,.12); }
   .role { font-weight: 600; border-radius: 4px; padding: 2px 7px; }
   .sev { font-weight: 600; }
-  .state { margin-left: auto; }
-  .issue-title { font-size: 13px; line-height: 1.5; }
+  .state { margin-left: auto; font-weight: 600; }
+  .issue-title { font-size: 13px; line-height: 1.5; font-weight: 500; }
   .list-foot { flex: none; display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid rgba(0,0,0,.06); }
 
   .grid { margin-top: 12px; display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 8px 12px; line-height: 1.6; }
