@@ -332,16 +332,15 @@
             <div class="muted small-text">审稿中的 PRD</div>
             <h1>{detail.title}</h1>
           </div>
-          <div class="start">
-            <div class="start-row">
-              {#if readyForNext}<span class="muted">PRD 按交接文档改好了？</span>{/if}
-              <button type="button" class={readyForNext ? "primary" : "secondary"} title="先从 Notion 拉取最新版本，再开始审稿"
+          {#if !readyForNext}
+            <div class="start">
+              <button type="button" class="secondary" title="先从 Notion 拉取最新版本，再开始审稿"
                 disabled={!!running || blocked} onclick={() => run("start")}>
-                {#if !readyForNext}<span aria-hidden="true">＋</span>{/if}开始第 {nextRound} 轮
+                <span aria-hidden="true">＋</span>开始第 {nextRound} 轮
               </button>
+              {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{/if}
             </div>
-            {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{/if}
-          </div>
+          {/if}
         </div>
 
         <div class="tabs" role="tablist" aria-label="轮次">
@@ -355,6 +354,15 @@
             </button>
           {/each}
         </div>
+
+        {#if readyForNext}
+          <div class="next-strip">
+            <span class="muted">第 {nextRound - 1} 轮已生成交接文档。PRD 按它改好之后，就可以审下一轮。</span>
+            {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{/if}
+            <button type="button" class="secondary small-btn" title="先从 Notion 拉取最新版本，再开始审稿"
+              disabled={!!running || blocked} onclick={() => run("start")}>开始第 {nextRound} 轮</button>
+          </div>
+        {/if}
 
         {#if round && !triage}
           <section class="notice">
@@ -529,7 +537,9 @@
   .secondary { min-height: 34px; display: inline-flex; align-items: center; gap: 6px; padding: 0 14px; background: #fff; color: #1f2328; border: 1px solid rgba(0,0,0,.18); border-radius: 8px; cursor: pointer; font-weight: 500; }
   .secondary:hover:not(:disabled) { background: #f7f6f2; }
   .secondary:disabled { color: #8a8f96; cursor: default; }
-  .start-row { display: flex; align-items: center; gap: 12px; }
+  .next-strip { flex: none; display: flex; align-items: center; gap: 12px; margin: 0 22px 12px; padding: 8px 12px 8px 14px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 8px; }
+  .next-strip > .muted { flex: 1; min-width: 0; }
+  .small-btn { min-height: 30px; padding: 0 12px; border-radius: 7px; font-size: 12px; font-weight: 600; }
   .start { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
   .blocked-hint { font-size: 11px; color: #8f2a21; }
   .muted { color: #5f6670; }
