@@ -110,6 +110,9 @@
   const undecided = $derived(
     triage ? triage.issues.filter((i) => !i.rejected_as && decisionOf(i.id) === null) : [],
   );
+  // Once the latest round is handed off, starting the next one becomes the
+  // page's main action; before that, deciding issues is.
+  const readyForNext = $derived(!!detail?.rounds.at(-1)?.has_handoff);
   const nextRound = $derived((detail?.rounds.at(-1)?.n ?? 0) + 1);
   const unfinished = $derived(
     round && round.latest && !round.triage && (round.stage === "failed" || round.stage === "fish" || round.stage === "triage"),
@@ -330,7 +333,13 @@
             <h1>{detail.title}</h1>
           </div>
           <div class="start">
-            <button type="button" class="primary" disabled={!!running || blocked} onclick={() => run("start")}>拉取最新 PRD，开始第 {nextRound} 轮</button>
+            <div class="start-row">
+              {#if readyForNext}<span class="muted">PRD 按交接文档改好了？</span>{/if}
+              <button type="button" class={readyForNext ? "primary" : "secondary"} title="先从 Notion 拉取最新版本，再开始审稿"
+                disabled={!!running || blocked} onclick={() => run("start")}>
+                {#if !readyForNext}<span aria-hidden="true">＋</span>{/if}开始第 {nextRound} 轮
+              </button>
+            </div>
             {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{/if}
           </div>
         </div>
@@ -395,7 +404,7 @@
                   <span class="muted small-text">
                     {undecided.length ? `还有 ${undecided.length} 条待决定` : round.has_handoff ? "交接文档已生成" : "都拍完了"}
                   </span>
-                  <button type="button" class="primary" disabled={undecided.length > 0} onclick={handoff}>
+                  <button type="button" class={round.has_handoff ? "secondary" : "primary"} disabled={undecided.length > 0} onclick={handoff}>
                     {round.has_handoff ? "重新生成交接文档" : "生成交接文档"}
                   </button>
                 </div>
@@ -517,6 +526,10 @@
   .bad-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #b3362b; transform: translateY(-1px); }
   .recheck { flex: none; min-height: 30px; padding: 0 12px; background: #fff; border: 1px solid #e3b5b0; border-radius: 7px; color: #8f2a21; cursor: pointer; font-size: 12px; font-weight: 500; }
   .recheck:disabled { opacity: .6; cursor: default; }
+  .secondary { min-height: 34px; display: inline-flex; align-items: center; gap: 6px; padding: 0 14px; background: #fff; color: #1f2328; border: 1px solid rgba(0,0,0,.18); border-radius: 8px; cursor: pointer; font-weight: 500; }
+  .secondary:hover:not(:disabled) { background: #f7f6f2; }
+  .secondary:disabled { color: #8a8f96; cursor: default; }
+  .start-row { display: flex; align-items: center; gap: 12px; }
   .start { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
   .blocked-hint { font-size: 11px; color: #8f2a21; }
   .muted { color: #5f6670; }
