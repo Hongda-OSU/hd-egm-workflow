@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import {
     api,
     onProgress,
@@ -44,6 +44,11 @@
   let src = $state<"all" | Role>("all");
   let issueId = $state<string | null>(null);
   let note = $state("");
+  let noteOpen = $state(false);
+  let noteEl = $state<HTMLInputElement | null>(null);
+  // Note saves and decisions go out one at a time so a note saved on blur
+  // can never land after (and undo) the decision click that caused the blur.
+  let saving: Promise<void> = Promise.resolve();
   let running = $state<string | null>(null);
   let progressLines = $state<string[]>([]);
   let message = $state<{ text: string; error: boolean } | null>(null);
@@ -129,7 +134,37 @@
   $effect(() => {
     const id = cur?.id;
     note = (id && round?.decisions.find((d) => d.issue_id === id)?.note) || "";
+    noteOpen = false;
   });
+  // The note stays folded away unless it has text or the issue is rejected,
+  // where it doubles as the rejection reason.
+  const showNote = $derived(noteOpen || note.trim() !== "" || (!!cur && decisionOf(cur.id) === "reject"));
+  const CHOICES: Advice[] = ["accept", "reject"];
+  const word = (a: Advice) => (a === "accept" ? "接受" : "驳回");
+  const sectionsOf = (i: Issue) => i.section.split(/\s*[；;]\s*/).join(" · ");
+
+  async function openNote() {
+    noteOpen = true;
+    await tick();
+    noteEl?.focus();
+  }
+
+  function saveNote() {
+    saving = saving.then(async () => {
+      if (!detail || !round || !cur || !round.latest) return;
+      const d = decisionOf(cur.id);
+      const saved = round.decisions.find((x) => x.issue_id === cur!.id)?.note ?? "";
+      // Without a decision the note just waits and goes out with the click.
+      if (!d || note.trim() === saved.trim()) return;
+      try {
+        await api.decide(detail.page_id, round.n, cur.id, d, note.trim() || null);
+        await loadDetail(true);
+      } catch (e) {
+        flash(String(e), true);
+      }
+    });
+    return saving;
+  }
 
   function flash(text: string, error = false) {
     message = { text, error };
@@ -200,13 +235,24 @@
   }
 
   async function decide(d: Advice) {
+    await saving;
     if (!detail || !round || !cur) return;
+    const id = cur.id;
+    // Only a first-time accept moves on; a reject stays put so the reason
+    // can be typed, and changing an earlier decision stays put too.
+    const advance = d === "accept" && decisionOf(id) === null && !cur.rejected_as;
     try {
-      await api.decide(detail.page_id, round.n, cur.id, d, note.trim() || null);
-      const at = shown.findIndex((i) => i.id === cur!.id);
+      await api.decide(detail.page_id, round.n, id, d, note.trim() || null);
+      const at = shown.findIndex((i) => i.id === id);
       await loadDetail(true);
-      const next = shown.slice(at + 1).find((i) => !i.rejected_as && decisionOf(i.id) === null);
-      if (next) issueId = next.id;
+      issueId = id;
+      if (advance) {
+        const next = shown.slice(at + 1).find((i) => !i.rejected_as && decisionOf(i.id) === null);
+        if (next) issueId = next.id;
+      } else if (d === "reject") {
+        await tick();
+        noteEl?.focus();
+      }
       await loadList();
     } catch (e) {
       flash(String(e), true);
@@ -417,7 +463,7 @@
                       <span class="state" style="color:{st.color}">{st.text}</span>
                     </span>
                     <span class="issue-title">{it.title}</span>
-                    <span class="issue-sections muted">{it.section.split(/\s*[；;]\s*/).join(" · ")}</span>
+                    <span class="issue-sections muted">{sectionsOf(it)}</span>
                   </button>
                 {:else}
                   <p class="muted center-text">这一类没有问题。</p>
@@ -437,45 +483,91 @@
 
             <section class="card detail">
               {#if cur}
-                {@const st = stateOf(cur)}
-                <div class="issue-meta">
-                  {#each [cur.source, ...cur.also_from] as r}
-                    <span class="role" style="color:{ROLE[r].color};background:{ROLE[r].bg}">{ROLE[r].label}金鱼</span>
-                  {/each}
-                  <span class="sev" style="color:{SEV[cur.severity].color}">严重度 {SEV[cur.severity].label}</span>
-                  <span class="muted">{cur.section}</span>
-                </div>
-                <h2>{cur.title}</h2>
-                <div class="grid">
-                  <span class="muted">问题</span><span>{cur.problem}</span>
-                  <span class="muted">影响</span><span>{cur.impact}</span>
-                </div>
-                <div class="advice">
-                  <div class="advice-head">整理员建议：{cur.advice === "accept" ? "接受" : "驳回"}</div>
-                  <p>{cur.reason}</p>
-                  {#if cur.suggested_change}<p><span class="muted">建议改法：</span>{cur.suggested_change}</p>{/if}
-                </div>
-                {#if cur.rejected_as}
-                  <p class="auto">这条和历史驳回的 {cur.rejected_as} 是同一个问题，已自动驳回，不用再拍板；判断错了可以改成接受。</p>
-                {/if}
-                <label class="note-label" for="note">备注（会写进交接文档）</label>
-                <textarea id="note" rows="2" bind:value={note} disabled={!round.latest} placeholder="可选"></textarea>
-                <div class="decide">
-                  <span class="muted">我的决定</span>
-                  <button type="button" class="choice accept" class:on={decisionOf(cur.id) === "accept"} disabled={!round.latest} onclick={() => decide("accept")}>接受</button>
-                  <button type="button" class="choice reject" class:on={decisionOf(cur.id) === "reject"} disabled={!round.latest} onclick={() => decide("reject")}>驳回</button>
-                  <span class="muted small-text">{round.latest ? `当前：${st.text}` : "历史轮次只读"}</span>
-                </div>
-                {#if cur.refs.length}
-                  <details class="refs">
-                    <summary>金鱼原文（{cur.refs.length} 条）</summary>
-                    {#each cur.refs as ref}
-                      <div class="ref"><span class="mono">{ref}</span><p>{resolveRef(round.fish, ref) ?? "（找不到原文）"}</p></div>
+                {@const d = decisionOf(cur.id)}
+                <div class="detail-body">
+                  <div class="issue-meta">
+                    <span class="sev" style="color:{SEV[cur.severity].color}" title="严重度">{SEV[cur.severity].label}</span>
+                    {#each foundBy(cur) as r}
+                      <span class="role" style="color:{ROLE[r].color};background:{ROLE[r].bg}" title={ROLE_HINT[r]}>{ROLE[r].label}</span>
                     {/each}
-                  </details>
-                {/if}
+                  </div>
+                  <h2>{cur.title}</h2>
+                  <p class="issue-sections muted">{sectionsOf(cur)}</p>
+                  <div class="field"><div class="field-label">问题</div><p>{cur.problem}</p></div>
+                  <div class="field"><div class="field-label">影响</div><p>{cur.impact}</p></div>
+                  <div class="advice">
+                    <div class="advice-head">
+                      <span>整理员</span>
+                      <span class="advice-pill" class:reject={cur.advice === "reject"}>建议{word(cur.advice)}</span>
+                    </div>
+                    <p>{cur.reason}</p>
+                    {#if cur.suggested_change}
+                      <div class="change"><div class="field-label">建议改法</div><p>{cur.suggested_change}</p></div>
+                    {/if}
+                  </div>
+                  {#if cur.rejected_as}
+                    <p class="auto">这条和历史驳回的 {cur.rejected_as} 是同一个问题，已自动驳回，不用再拍板；判断错了可以改成接受。</p>
+                  {/if}
+                  {#if cur.refs.length}
+                    <details class="refs">
+                      <summary>金鱼原话（{cur.refs.length} 条）</summary>
+                      {#each cur.refs as ref}
+                        {@const who = ref.split("#")[0]}
+                        <div class="ref"><span class="ref-who">{FISH_NAMES[who] ?? who}金鱼</span><p>{resolveRef(round.fish, ref) ?? "（找不到原文）"}</p></div>
+                      {/each}
+                    </details>
+                  {/if}
+                </div>
+
+                <div class="decide-bar">
+                  {#if !round.latest}
+                    <div class="decide-row">
+                      <span class="decided">{d ? `你${word(d)}了` : stateOf(cur).text}</span>
+                      <span class="muted small-text push">历史轮次只读</span>
+                    </div>
+                    {#if note}<p class="note-ro">备注：{note}</p>{/if}
+                  {:else}
+                    {#if d}
+                      <div class="decide-row">
+                        <span class="decided" class:accept={d === "accept"}>
+                          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                          你{word(d)}了
+                        </span>
+                        <span class="small-text" class:muted={d === cur.advice} class:against={d !== cur.advice}>
+                          {d === cur.advice ? "跟整理员建议一致" : "跟整理员建议相反"}
+                        </span>
+                        <button type="button" class="link push" onclick={() => decide(d === "accept" ? "reject" : "accept")}>
+                          改成{word(d === "accept" ? "reject" : "accept")}
+                        </button>
+                      </div>
+                    {:else if cur.rejected_as}
+                      <div class="decide-row">
+                        <span class="decided">已自动驳回 · 同 {cur.rejected_as}</span>
+                        <button type="button" class="link push" onclick={() => decide("accept")}>改成接受</button>
+                      </div>
+                    {:else}
+                      <div class="decide-row">
+                        <span class="muted small-text">整理员建议<b class="adv" class:reject={cur.advice === "reject"}>{word(cur.advice)}</b></span>
+                        <span class="decide-btns push">
+                          {#each CHOICES as a}
+                            <button type="button" class="choice {a}" class:advised={cur.advice === a} onclick={() => decide(a)}>
+                              {cur.advice === a ? `同意，${word(a)}` : word(a)}
+                            </button>
+                          {/each}
+                        </span>
+                      </div>
+                    {/if}
+                    {#if showNote}
+                      <input class="note" type="text" aria-label="备注" bind:this={noteEl} bind:value={note} onblur={saveNote}
+                        onkeydown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+                        placeholder={d === "reject" ? "为什么驳回？（可选，会写进交接文档）" : "备注（可选，会写进交接文档）"} />
+                    {:else}
+                      <button type="button" class="link add-note" onclick={openNote}>＋ 加备注</button>
+                    {/if}
+                  {/if}
+                </div>
               {:else}
-                <p class="muted center-text">选一条问题。</p>
+                <p class="muted center-text detail-empty">选一条问题。</p>
               {/if}
             </section>
           </div>
@@ -619,7 +711,9 @@
   .panes { flex: 1; min-height: 0; display: flex; gap: 14px; padding: 0 22px 18px; }
   .card { min-width: 0; display: flex; flex-direction: column; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; min-height: 0; }
   .list { flex: 1 1 0; }
-  .detail { flex: 1.15 1 0; overflow-y: auto; padding: 18px 20px; }
+  .detail { flex: 1.15 1 0; }
+  .detail-body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px; }
+  .detail-empty { padding: 18px 20px; }
   .chips { flex: none; display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 14px; border-bottom: 1px solid rgba(0,0,0,.06); }
   .chip { min-height: 30px; padding: 0 10px; border-radius: 999px; border: 1px solid rgba(0,0,0,.12); background: #fff; color: #2b3240; cursor: pointer; font-size: 12px; }
   .chip.on { background: #1f2328; color: #fff; border-color: #1f2328; }
@@ -637,24 +731,42 @@
   .issue-title { font-size: 13px; line-height: 1.5; font-weight: 500; }
   .list-foot { flex: none; display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid rgba(0,0,0,.06); }
 
-  .grid { margin-top: 12px; display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 8px 12px; line-height: 1.6; }
+  .detail h2 { margin-top: 8px; }
+  .detail .issue-sections { margin: 4px 0 0; }
+  .field { margin-top: 14px; }
+  .field-label { font-size: 11px; font-weight: 600; color: #5f6670; }
+  .field p, .change p { margin: 4px 0 0; line-height: 1.65; }
   .advice { margin-top: 16px; padding: 12px 14px; background: #f4f5f8; border-radius: 8px; }
-  .advice-head { font-size: 11px; font-weight: 600; color: #4a5a7a; }
+  .advice-head { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 600; color: #4a5a7a; }
+  .advice-pill { color: #1f7a4d; background: #e6f2eb; border-radius: 999px; padding: 2px 9px; }
+  .advice-pill.reject { color: #5f6670; background: #e9e7e1; }
   .advice p { margin: 6px 0 0; line-height: 1.6; color: #2b3240; }
+  .change { margin-top: 10px; padding-left: 10px; border-left: 2px solid #c9cfdb; }
   .auto { margin: 12px 0 0; padding: 10px 12px; background: #fbfaf7; border-radius: 8px; color: #5f6670; line-height: 1.6; }
-  .note-label { display: block; margin-top: 14px; font-size: 11px; color: #5f6670; }
-  textarea { width: 100%; box-sizing: border-box; margin-top: 4px; padding: 8px 10px; border: 1px solid rgba(0,0,0,.14); border-radius: 8px; font: inherit; resize: vertical; }
-  .decide { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
-  .choice { min-height: 36px; padding: 0 14px; border-radius: 8px; background: #fff; cursor: pointer; font-weight: 500; }
-  .choice.accept { border: 1px solid #1f7a4d; color: #1f7a4d; }
-  .choice.accept.on { background: #1f7a4d; color: #fff; }
-  .choice.reject { border: 1px solid #5f6670; color: #5f6670; }
-  .choice.reject.on { background: #5f6670; color: #fff; }
-  .choice:disabled { opacity: .5; cursor: default; }
   .refs { margin-top: 18px; }
   .refs summary { cursor: pointer; font-size: 12px; font-weight: 600; }
   .ref { margin-top: 8px; padding: 8px 10px; background: #fbfaf7; border-radius: 6px; }
+  .ref-who { font-size: 11px; font-weight: 600; color: #5f6670; }
   .ref p { margin: 4px 0 0; line-height: 1.6; }
+
+  .decide-bar { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 12px 20px 14px; border-top: 1px solid rgba(0,0,0,.08); background: #fbfaf7; border-radius: 0 0 10px 10px; }
+  .decide-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 34px; }
+  .push { margin-left: auto; }
+  .decide-btns { display: inline-flex; gap: 6px; }
+  .choice { min-height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid rgba(0,0,0,.14); background: #fff; color: #5f6670; cursor: pointer; font-weight: 500; }
+  .choice:hover { border-color: rgba(0,0,0,.3); }
+  .choice.advised.accept { border-color: #1f7a4d; background: #e6f2eb; color: #1f7a4d; }
+  .choice.advised.reject { border-color: #5f6670; background: #e9e7e1; color: #1f2328; }
+  .adv { color: #1f7a4d; }
+  .adv.reject { color: #1f2328; }
+  .decided { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; color: #1f2328; }
+  .decided.accept { color: #1f7a4d; }
+  .against { color: #b85414; }
+  .link { background: none; border: none; padding: 0; font: inherit; font-size: 12px; color: #5f6670; cursor: pointer; text-decoration: underline; }
+  .link:hover { color: #1f2328; }
+  .add-note { align-self: flex-start; text-decoration: none; }
+  .note { width: 100%; box-sizing: border-box; min-height: 34px; padding: 0 10px; border: 1px solid rgba(0,0,0,.14); border-radius: 8px; background: #fff; font: inherit; }
+  .note-ro { margin: 0; font-size: 12px; color: #5f6670; }
 
   .right { flex: 0 0 272px; min-height: 0; overflow-y: auto; background: #fbfaf7; border-left: 1px solid rgba(0,0,0,.08); padding: 16px; display: flex; flex-direction: column; gap: 18px; }
   .right section { display: flex; flex-direction: column; }
