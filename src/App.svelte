@@ -38,6 +38,9 @@
   let status = $state<AppStatus | null>(null);
   let prds = $state<PrdList | null>(null);
   let rules = $state<RuleItem[]>([]);
+  // True until the first PRD list (and the first PRD's rounds) arrive, so the
+  // empty states never claim "nothing here" while Notion is still answering.
+  let booting = $state(true);
   let selectedId = $state<string | null>(null);
   let detail = $state<PrdDetail | null>(null);
   let roundIdx = $state(0);
@@ -191,11 +194,27 @@
 
   async function loadList() {
     try {
-      [prds, rules] = await Promise.all([api.listPrds(), api.rulePages()]);
+      prds = await api.listPrds();
       if (!selectedId && prds.items.length) await select(prds.items[0].page_id);
     } catch (e) {
       flash(String(e), true);
+    } finally {
+      booting = false;
     }
+  }
+
+  // Rule pages come from local settings, so they need not wait for Notion.
+  async function loadRules() {
+    try {
+      rules = await api.rulePages();
+    } catch (e) {
+      flash(String(e), true);
+    }
+  }
+
+  function refresh() {
+    loadRules();
+    loadList();
   }
 
   async function loadDetail(keepPosition: boolean) {
@@ -275,7 +294,7 @@
       if (p.page_id === running) progressLines = [...progressLines, p.line];
     });
     checkStatus();
-    loadList();
+    refresh();
     // Coming back from a terminal login should clear the banner by itself.
     const onFocus = () => checkStatus();
     window.addEventListener("focus", onFocus);
@@ -285,6 +304,10 @@
     };
   });
 </script>
+
+{#snippet dots()}
+  <span class="dots" aria-hidden="true"><span></span><span></span><span></span></span>
+{/snippet}
 
 <div class="app">
   <header class="top">
@@ -313,7 +336,7 @@
     <aside class="left">
       <div class="left-head">
         <span class="label">HD 的项目计划</span>
-        <button type="button" class="icon-btn" onclick={loadList} title="刷新列表" aria-label="刷新列表">↻</button>
+        <button type="button" class="icon-btn" onclick={refresh} title="刷新列表" aria-label="刷新列表">↻</button>
       </div>
       <div class="search">
         <input type="search" placeholder="搜索 PRD" aria-label="搜索 PRD" bind:value={query} />
@@ -322,33 +345,38 @@
         <p class="offline">Notion 连不上，只显示本地已有的 PRD。</p>
       {/if}
       <div class="prd-list">
-        {#each GROUPS as g (g.key)}
-          {@const items = grouped[g.key]}
-          {@const open = openGroups[g.key] || query.trim() !== "" || items.some((p) => p.page_id === selectedId)}
-          {#if items.length || g.key === "active"}
-            <button type="button" class="group-head" aria-expanded={open}
-              onclick={() => (openGroups[g.key] = !open)}>
-              <span class="caret" class:open aria-hidden="true">›</span>
-              <span>{g.label}</span>
-              <span class="count">{items.length}</span>
-            </button>
-            {#if open}
-              {#each items as p (p.page_id)}
-                <button type="button" class="prd" class:on={p.page_id === selectedId} class:archived={g.key !== "active"}
-                  title={p.title} onclick={() => select(p.page_id)}>
-                  <span class="prd-title ellipsis">{p.name}</span>
-                  {#if p.status === "go"}
-                    <span class="pill go">GO</span>
-                  {:else if p.rounds}
-                    <span class="pill review">第 {p.rounds} 轮</span>
-                  {/if}
-                </button>
-              {:else}
-                <p class="none">{query.trim() ? "没有匹配的 PRD" : "没有进行中的 PRD"}</p>
-              {/each}
+        {#if booting}
+          <div class="group-head static"><span class="caret open" aria-hidden="true">›</span><span>进行中</span></div>
+          <p class="loading loading-line" role="status">{@render dots()}正在从 Notion 读取…</p>
+        {:else}
+          {#each GROUPS as g (g.key)}
+            {@const items = grouped[g.key]}
+            {@const open = openGroups[g.key] || query.trim() !== "" || items.some((p) => p.page_id === selectedId)}
+            {#if items.length || g.key === "active"}
+              <button type="button" class="group-head" aria-expanded={open}
+                onclick={() => (openGroups[g.key] = !open)}>
+                <span class="caret" class:open aria-hidden="true">›</span>
+                <span>{g.label}</span>
+                <span class="count">{items.length}</span>
+              </button>
+              {#if open}
+                {#each items as p (p.page_id)}
+                  <button type="button" class="prd" class:on={p.page_id === selectedId} class:archived={g.key !== "active"}
+                    title={p.title} onclick={() => select(p.page_id)}>
+                    <span class="prd-title ellipsis">{p.name}</span>
+                    {#if p.status === "go"}
+                      <span class="pill go">GO</span>
+                    {:else if p.rounds}
+                      <span class="pill review">第 {p.rounds} 轮</span>
+                    {/if}
+                  </button>
+                {:else}
+                  <p class="none">{query.trim() ? "没有匹配的 PRD" : "没有进行中的 PRD"}</p>
+                {/each}
+              {/if}
             {/if}
-          {/if}
-        {/each}
+          {/each}
+        {/if}
       </div>
       <div class="rules">
         <div class="label">规则页（Notion）</div>
@@ -361,7 +389,12 @@
     </aside>
 
     <main class="center">
-      {#if running === selectedId}
+      {#if booting}
+        <section class="empty">
+          <div class="loading" role="status">{@render dots()}正在读取 PRD 列表</div>
+          <p class="muted small-text">Notion 慢的时候要几秒；连不上会改用本地已有的数据</p>
+        </section>
+      {:else if running === selectedId}
         <section class="running">
           <h1>{selectedItem?.title}</h1>
           <p class="muted">4 条金鱼并行审稿，整理员随后汇总，通常 2～3 分钟。</p>
@@ -613,7 +646,7 @@
             <div class="spec"><span style="color:{c.pass ? '#1f7a4d' : '#b3362b'}" aria-hidden="true">{c.pass ? "✓" : "✕"}</span><span>{c.item}</span></div>
           {/each}
         </section>
-      {:else}
+      {:else if !booting}
         <p class="muted small-text">跑完一轮后，这里显示三条金鱼的结论、命中率和规范达标。</p>
       {/if}
     </aside>
@@ -686,6 +719,16 @@
   .pill.review { color: #b85414; background: #fbefe6; }
   .pill.go { color: #1f7a4d; background: #e4f2ea; }
   .none { margin: 2px 0 6px 24px; font-size: 11px; color: #8a8f96; }
+  .group-head.static { cursor: default; }
+  .group-head.static:hover { color: #5f6670; }
+  .loading { display: flex; align-items: center; color: #5f6670; }
+  .loading-line { margin: 6px 0 6px 24px; font-size: 11px; }
+  .dots { display: inline-flex; gap: 3px; margin-right: 6px; }
+  .dots span { width: 5px; height: 5px; border-radius: 50%; background: #5f6670; animation: blink 1.2s infinite both; }
+  .dots span:nth-child(2) { animation-delay: .2s; }
+  .dots span:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .dots span { animation: none; opacity: .6; } }
   .rules { flex: none; padding: 12px 16px 16px; border-top: 1px solid rgba(0,0,0,.08); }
   .rule { width: 100%; display: flex; justify-content: space-between; min-height: 26px; align-items: center; padding: 0; background: none; border: none; color: #4a5a7a; cursor: pointer; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; }
   .rule:disabled { cursor: default; color: #8a8f96; }
