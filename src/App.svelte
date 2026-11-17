@@ -171,7 +171,7 @@
   <header class="top">
     <div class="brand">
       <span class="name">hd-egm-workflow</span>
-      <span class="muted">大象写，金鱼审</span>
+      <span class="muted">Claude 写 PRD，GPT 零上下文审稿</span>
     </div>
     <div class="conns">
       {#each [["Notion · 只读", status?.notion], ["codex 已登录", status?.codex], ["claude 已登录", status?.claude]] as [label, ok]}
