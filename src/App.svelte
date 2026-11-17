@@ -41,6 +41,37 @@
   let progressLines = $state<string[]>([]);
   let message = $state<{ text: string; error: boolean } | null>(null);
 
+  // Preflight: what a round needs. Nothing is shown while everything passes.
+  type Problem = { text: string; cmd: string | null };
+  const problems = $derived.by((): Problem[] => {
+    if (!status) return [];
+    const out: Problem[] = [];
+    if (!status.notion)
+      out.push({ text: "钥匙串里没有 Notion token，拉不到 PRD。在终端运行", cmd: "security add-generic-password -s hd-egm-workflow -a notion -w" });
+    if (!status.codex)
+      out.push(status.codex_home
+        ? { text: "GPT 金鱼没登录，审稿跑不了。在终端运行", cmd: `CODEX_HOME="${status.codex_home}" codex login` }
+        : { text: "读不到 app 的设置文件，GPT 金鱼没法启动。", cmd: null });
+    if (!status.claude)
+      out.push({ text: "Claude 整理员没登录，整理那一步跑不了。在终端运行", cmd: "claude auth login" });
+    return out;
+  });
+  const blocked = $derived(problems.length > 0);
+  let checking = $state(false);
+
+  async function checkStatus(): Promise<boolean> {
+    if (checking) return !blocked;
+    checking = true;
+    try {
+      status = await api.appStatus();
+    } catch (e) {
+      flash(String(e), true);
+    } finally {
+      checking = false;
+    }
+    return !blocked;
+  }
+
   const selectedItem = $derived(prds?.items.find((p) => p.page_id === selectedId) ?? null);
 
   // Notion titles carry an archive prefix ("[已完成] ") and a doc-type suffix
@@ -142,6 +173,7 @@
 
   async function run(kind: "start" | "resume") {
     if (!selectedId || running) return;
+    if (!(await checkStatus())) return;
     running = selectedId;
     progressLines = [];
     try {
@@ -186,10 +218,14 @@
     const unlisten = onProgress((p) => {
       if (p.page_id === running) progressLines = [...progressLines, p.line];
     });
-    api.appStatus().then((s) => (status = s));
+    checkStatus();
     loadList();
+    // Coming back from a terminal login should clear the banner by itself.
+    const onFocus = () => checkStatus();
+    window.addEventListener("focus", onFocus);
     return () => {
       unlisten.then((f) => f());
+      window.removeEventListener("focus", onFocus);
     };
   });
 </script>
@@ -200,12 +236,18 @@
       <span class="name">hd-egm-workflow</span>
       <span class="muted">Claude 写 PRD，GPT 零上下文审稿</span>
     </div>
-    <div class="conns">
-      {#each [["Notion · 只读", status?.notion], ["codex 已登录", status?.codex], ["claude 已登录", status?.claude]] as [label, ok]}
-        <span class="conn"><span class="dot" style="background:{ok === undefined ? '#c9c6bd' : ok ? '#1f7a4d' : '#b3362b'}" aria-hidden="true"></span>{ok === false ? String(label).replace("已登录", "未登录") : label}</span>
-      {/each}
-    </div>
   </header>
+
+  {#if blocked}
+    <div class="preflight" role="alert">
+      <div class="preflight-lines">
+        {#each problems as p}
+          <p><span class="bad-dot" aria-hidden="true"></span><span><b>{p.text}</b>{#if p.cmd}<code>{p.cmd}</code>，然后点右边重新检查。{/if}</span></p>
+        {/each}
+      </div>
+      <button type="button" class="recheck" disabled={checking} onclick={checkStatus}>{checking ? "检查中…" : "重新检查"}</button>
+    </div>
+  {/if}
 
   {#if message}
     <div class="toast" class:error={message.error} role="status">{message.text}</div>
@@ -277,7 +319,8 @@
           <h1>{selectedItem?.title ?? "选一份 PRD"}</h1>
           {#if selectedItem}
             <p class="muted">拉取 Notion 里的最新版本存成快照，4 条金鱼各开一个零记忆会话审稿，结果交给整理员归类。</p>
-            <button type="button" class="primary big" disabled={!!running} onclick={() => run("start")}>开始第 1 轮</button>
+            <button type="button" class="primary big" disabled={!!running || blocked} onclick={() => run("start")}>开始第 1 轮</button>
+            {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{/if}
           {/if}
         </section>
       {:else}
@@ -286,7 +329,10 @@
             <div class="muted small-text">审稿中的 PRD</div>
             <h1>{detail.title}</h1>
           </div>
-          <button type="button" class="primary" disabled={!!running} onclick={() => run("start")}>拉取最新 PRD，开始第 {nextRound} 轮</button>
+          <div class="start">
+            <button type="button" class="primary" disabled={!!running || blocked} onclick={() => run("start")}>拉取最新 PRD，开始第 {nextRound} 轮</button>
+            {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{/if}
+          </div>
         </div>
 
         <div class="tabs" role="tablist" aria-label="轮次">
@@ -311,7 +357,8 @@
                 {/each}
                 <li>整理员：{STEP_LABEL[round.triage_step.status]}{round.triage_step.error ? ` — ${round.triage_step.error}` : ""}</li>
               </ul>
-              <button type="button" class="primary" disabled={!!running} onclick={() => run("resume")}>继续跑没完成的部分</button>
+              <button type="button" class="primary" disabled={!!running || blocked} onclick={() => run("resume")}>继续跑没完成的部分</button>
+              {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{/if}
             {:else}
               <p class="muted">这一轮只拉了快照，没有审稿结果。</p>
             {/if}
@@ -463,9 +510,15 @@
   .top { flex: none; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 20px; background: #fff; border-bottom: 1px solid rgba(0,0,0,.08); }
   .brand { display: flex; align-items: baseline; gap: 12px; }
   .name { font-weight: 700; font-size: 16px; }
-  .conns { display: flex; gap: 14px; font-size: 12px; color: #5f6670; }
-  .conn { display: inline-flex; align-items: center; gap: 6px; }
-  .dot { width: 7px; height: 7px; border-radius: 50%; }
+  .preflight { flex: none; display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: #fbeceb; border-bottom: 1px solid #f0cfcb; color: #8f2a21; }
+  .preflight-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .preflight p { margin: 0; display: flex; align-items: baseline; gap: 10px; line-height: 1.6; }
+  .preflight code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; background: #fff; padding: 1px 6px; margin: 0 4px; border-radius: 4px; user-select: all; -webkit-user-select: all; word-break: break-all; }
+  .bad-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #b3362b; transform: translateY(-1px); }
+  .recheck { flex: none; min-height: 30px; padding: 0 12px; background: #fff; border: 1px solid #e3b5b0; border-radius: 7px; color: #8f2a21; cursor: pointer; font-size: 12px; font-weight: 500; }
+  .recheck:disabled { opacity: .6; cursor: default; }
+  .start { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+  .blocked-hint { font-size: 11px; color: #8f2a21; }
   .muted { color: #5f6670; }
   .small-text { font-size: 11px; }
   .strong { font-weight: 600; }

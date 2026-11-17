@@ -31,15 +31,19 @@ struct AppStatus {
     notion: bool,
     codex: bool,
     claude: bool,
+    /// The goldfish's dedicated CODEX_HOME, so the UI can show the exact
+    /// login command when `codex` is false.
+    codex_home: Option<String>,
 }
 
-/// Header indicators. Only exit codes / the `loggedIn` flag are read; no
+/// Preflight for a round. Only exit codes / the `loggedIn` flag are read; no
 /// account details leave this function.
 #[tauri::command]
 async fn app_status() -> AppStatus {
-    let codex = settings().is_ok_and(|s| {
+    let home = settings().ok().map(|s| s.codex_home());
+    let codex = home.as_ref().is_some_and(|h| {
         Command::new("codex")
-            .env("CODEX_HOME", s.codex_home())
+            .env("CODEX_HOME", h)
             .args(["login", "status"])
             .output()
             .is_ok_and(|o| o.status.success())
@@ -51,7 +55,12 @@ async fn app_status() -> AppStatus {
         .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
         .and_then(|v| v["loggedIn"].as_bool())
         .unwrap_or(false);
-    AppStatus { notion: Notion::from_keychain().is_ok(), codex, claude }
+    AppStatus {
+        notion: Notion::from_keychain().is_ok(),
+        codex,
+        claude,
+        codex_home: home.map(|h| h.display().to_string()),
+    }
 }
 
 #[derive(Serialize)]

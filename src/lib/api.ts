@@ -97,6 +97,7 @@ export interface AppStatus {
   notion: boolean;
   codex: boolean;
   claude: boolean;
+  codex_home: string | null;
 }
 
 export const api = {
