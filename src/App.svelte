@@ -218,8 +218,13 @@
   }
 
   async function loadDetail(keepPosition: boolean) {
-    if (!selectedId) return;
-    detail = await api.getPrd(selectedId);
+    const id = selectedId;
+    if (!id) return;
+    const loaded = await api.getPrd(id);
+    // Clicking through PRDs quickly can resolve loads out of order; a reply
+    // for a PRD that is no longer selected must not replace the current one.
+    if (selectedId !== id) return;
+    detail = loaded;
     const last = Math.max(0, (detail?.rounds.length ?? 1) - 1);
     if (!keepPosition || roundIdx > last) roundIdx = last;
   }
