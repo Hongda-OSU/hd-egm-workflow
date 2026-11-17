@@ -449,6 +449,8 @@
 </div>
 
 <style>
+  /* The window itself never scrolls or rubber-bands; only the panes inside do. */
+  :global(html), :global(body) { height: 100%; overflow: hidden; overscroll-behavior: none; }
   :global(body) {
     margin: 0;
     background: #f4f3ef;
