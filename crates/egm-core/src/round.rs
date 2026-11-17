@@ -45,9 +45,10 @@ fn read(path: &Path) -> Result<String> {
 }
 
 /// The 交付前检查清单 items of hd-prd-rules, minus those a goldfish cannot
-/// judge: marking the title [已完成] (not done while under review) and the
+/// judge: marking the title [已完成] (not done while under review), the
 /// 关键决策清单 item (stripped from what goldfish see; `pull` already
-/// refuses a PRD without it).
+/// refuses a PRD without it) and child-page items (goldfish only see a
+/// `📄 子页面：title` line, never the child page's body).
 pub fn spec_checklist(prd_rules: &str) -> Result<String> {
     let mut in_section = false;
     let mut items = Vec::new();
@@ -61,6 +62,7 @@ pub fn spec_checklist(prd_rules: &str) -> Result<String> {
         if let (true, Some(item)) = (in_section, item)
             && !item.contains("[已完成]")
             && !item.contains(crate::prd::KEY_DECISIONS_HEADING)
+            && !item.contains("子页面")
         {
             items.push(format!("- {item}"));
         }
@@ -356,8 +358,8 @@ mod tests {
     }
 
     #[test]
-    fn checklist_takes_its_section_and_drops_completion_item() {
-        let rules = "## 参考\n\n- [ ] not this\n\n## 交付前检查清单\n\n- [ ] 有里程碑表\n- [ ] 末尾有关键决策清单\n- [ ] 项目做完后，标题加了 `[已完成]`\n\n## 参考\n- [ ] nor this\n";
+    fn checklist_takes_its_section_and_drops_unjudgeable_items() {
+        let rules = "## 参考\n\n- [ ] not this\n\n## 交付前检查清单\n\n- [ ] 有里程碑表\n- [ ] 末尾有关键决策清单\n- [ ] 子页面（若有）不重复主 PRD\n- [ ] 项目做完后，标题加了 `[已完成]`\n\n## 参考\n- [ ] nor this\n";
         assert_eq!(spec_checklist(rules).unwrap(), "- 有里程碑表");
     }
 
