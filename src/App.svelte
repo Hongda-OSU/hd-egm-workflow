@@ -8,6 +8,7 @@
     type AppStatus,
     type Issue,
     type PrdDetail,
+    type PrdItem,
     type PrdList,
     type Role,
     type RuleItem,
@@ -41,6 +42,32 @@
   let message = $state<{ text: string; error: boolean } | null>(null);
 
   const selectedItem = $derived(prds?.items.find((p) => p.page_id === selectedId) ?? null);
+
+  // Notion titles carry an archive prefix ("[已完成] ") and a doc-type suffix
+  // (" · 产品文档"); the list shows them as groups and drops the suffix.
+  type Group = "active" | "done" | "dropped";
+  const GROUPS: { key: Group; label: string }[] = [
+    { key: "active", label: "进行中" },
+    { key: "done", label: "已完成" },
+    { key: "dropped", label: "已放弃" },
+  ];
+  function parseTitle(title: string): { name: string; group: Group } {
+    const m = title.match(/^\s*\[(已完成|已放弃)\]\s*/);
+    const group: Group = m ? (m[1] === "已完成" ? "done" : "dropped") : "active";
+    const name = title.slice(m?.[0].length ?? 0).replace(/\s*[·—–-]\s*产品文档\s*$/, "").trim();
+    return { name: name || title, group };
+  }
+  let query = $state("");
+  let openGroups = $state<Record<Group, boolean>>({ active: true, done: false, dropped: false });
+  const grouped = $derived.by(() => {
+    const q = query.trim().toLowerCase();
+    const out: Record<Group, (PrdItem & { name: string })[]> = { active: [], done: [], dropped: [] };
+    for (const p of prds?.items ?? []) {
+      const { name, group } = parseTitle(p.title);
+      if (!q || name.toLowerCase().includes(q)) out[group].push({ ...p, name });
+    }
+    return out;
+  });
   const round = $derived(detail?.rounds[roundIdx] ?? null);
   const triage = $derived(round?.triage ?? null);
   const decisionOf = (id: string): Advice | null =>
@@ -188,19 +215,41 @@
     <aside class="left">
       <div class="left-head">
         <span class="label">HD 的项目计划</span>
-        <button type="button" class="small" onclick={loadList}>刷新</button>
+        <button type="button" class="icon-btn" onclick={loadList} title="刷新列表" aria-label="刷新列表">↻</button>
+      </div>
+      <div class="search">
+        <input type="search" placeholder="搜索 PRD" aria-label="搜索 PRD" bind:value={query} />
       </div>
       {#if prds?.offline}
         <p class="offline">Notion 连不上，只显示本地已有的 PRD。</p>
       {/if}
       <div class="prd-list">
-        {#each prds?.items ?? [] as p (p.page_id)}
-          <button type="button" class="prd" class:on={p.page_id === selectedId} onclick={() => select(p.page_id)}>
-            <span class="prd-title">{p.title}</span>
-            <span class="prd-status" style="color:{p.status === 'go' ? '#1f7a4d' : p.rounds ? '#b85414' : '#5f6670'}">
-              {p.status === "go" ? `GO · ${p.rounds} 轮` : p.rounds ? `审稿中 · 第 ${p.rounds} 轮` : "还没审"}
-            </span>
-          </button>
+        {#each GROUPS as g (g.key)}
+          {@const items = grouped[g.key]}
+          {@const open = openGroups[g.key] || query.trim() !== "" || items.some((p) => p.page_id === selectedId)}
+          {#if items.length || g.key === "active"}
+            <button type="button" class="group-head" aria-expanded={open}
+              onclick={() => (openGroups[g.key] = !open)}>
+              <span class="caret" class:open aria-hidden="true">›</span>
+              <span>{g.label}</span>
+              <span class="count">{items.length}</span>
+            </button>
+            {#if open}
+              {#each items as p (p.page_id)}
+                <button type="button" class="prd" class:on={p.page_id === selectedId} class:archived={g.key !== "active"}
+                  title={p.title} onclick={() => select(p.page_id)}>
+                  <span class="prd-title ellipsis">{p.name}</span>
+                  {#if p.status === "go"}
+                    <span class="pill go">GO</span>
+                  {:else if p.rounds}
+                    <span class="pill review">第 {p.rounds} 轮</span>
+                  {/if}
+                </button>
+              {:else}
+                <p class="none">{query.trim() ? "没有匹配的 PRD" : "没有进行中的 PRD"}</p>
+              {/each}
+            {/if}
+          {/if}
         {/each}
       </div>
       <div class="rules">
@@ -429,13 +478,28 @@
   .left { flex: 0 0 248px; display: flex; flex-direction: column; background: #fbfaf7; border-right: 1px solid rgba(0,0,0,.08); min-height: 0; }
   .left-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px 8px; }
   .left-head .label { margin: 0; }
-  .small { min-height: 28px; padding: 0 8px; background: none; border: 1px solid rgba(0,0,0,.12); border-radius: 6px; color: #5f6670; cursor: pointer; font-size: 11px; }
   .offline { margin: 0 16px 8px; font-size: 11px; color: #a86b00; }
-  .prd-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px; }
-  .prd { width: 100%; min-height: 52px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 8px 10px; margin-bottom: 2px; text-align: left; background: transparent; border: none; border-radius: 8px; color: #1f2328; cursor: pointer; }
-  .prd.on { background: #ecebe5; }
+  .icon-btn { width: 28px; height: 28px; display: grid; place-items: center; padding: 0; background: none; border: none; border-radius: 6px; color: #5f6670; cursor: pointer; font-size: 15px; }
+  .icon-btn:hover { background: #ecebe5; color: #1f2328; }
+  .search { padding: 0 12px 8px; }
+  .search input { width: 100%; box-sizing: border-box; height: 30px; padding: 0 10px; border: 1px solid rgba(0,0,0,.1); border-radius: 7px; background: #fff; font: inherit; font-size: 12px; color: #1f2328; }
+  .search input:focus { outline: none; border-color: #4a5a7a; }
+  .prd-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px 8px; }
+  .group-head { width: 100%; display: flex; align-items: center; gap: 6px; min-height: 28px; margin-top: 6px; padding: 0 8px; background: none; border: none; color: #5f6670; cursor: pointer; font-size: 11px; font-weight: 600; text-align: left; }
+  .group-head:hover { color: #1f2328; }
+  .caret { width: 10px; display: inline-block; transition: transform .12s; }
+  .caret.open { transform: rotate(90deg); }
+  .count { margin-left: auto; font-weight: 400; color: #8a8f96; }
+  .prd { width: 100%; min-height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 10px 0 24px; text-align: left; background: transparent; border: none; border-radius: 7px; color: #1f2328; cursor: pointer; }
+  .prd:hover { background: #f1f0eb; }
+  .prd.on { background: #e6e4dc; }
   .prd.on .prd-title { font-weight: 600; }
-  .prd-status { font-size: 11px; }
+  .prd.archived { color: #5f6670; }
+  .prd-title { flex: 1; }
+  .pill { flex: none; font-size: 10px; font-weight: 600; line-height: 1; padding: 4px 7px; border-radius: 999px; }
+  .pill.review { color: #b85414; background: #fbefe6; }
+  .pill.go { color: #1f7a4d; background: #e4f2ea; }
+  .none { margin: 2px 0 6px 24px; font-size: 11px; color: #8a8f96; }
   .rules { flex: none; padding: 12px 16px 16px; border-top: 1px solid rgba(0,0,0,.08); }
   .rule { width: 100%; display: flex; justify-content: space-between; min-height: 26px; align-items: center; padding: 0; background: none; border: none; color: #4a5a7a; cursor: pointer; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; }
   .rule:disabled { cursor: default; color: #8a8f96; }
