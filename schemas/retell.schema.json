@@ -17,7 +17,7 @@
     },
     "guesses": {
       "type": "array",
-      "description": "Places the PRD leaves unclear and the reviewer had to guess. Empty if none.",
+      "description": "Places the PRD leaves unclear and the reviewer had to guess, including sections the reviewer could not paraphrase. Empty if none.",
       "items": {
         "type": "object",
         "additionalProperties": false,

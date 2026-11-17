@@ -18,6 +18,7 @@
         "properties": {
           "kind": {
             "type": "string",
+            "description": "path = where data files and directories live; data = record fields; interface = commands between components; error = error handling; acceptance = acceptance criteria and milestone checkpoints.",
             "enum": ["path", "data", "interface", "error", "acceptance"]
           },
           "section": { "type": "string" },

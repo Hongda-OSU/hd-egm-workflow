@@ -8,6 +8,7 @@
   "properties": {
     "checks": {
       "type": "array",
+      "description": "One entry per checklist item, in checklist order.",
       "items": {
         "type": "object",
         "additionalProperties": false,

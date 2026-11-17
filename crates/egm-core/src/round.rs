@@ -10,7 +10,7 @@ use serde_json::Value;
 use tokio::task::JoinSet;
 
 use crate::agents::{self, ClaudeConfig, CodexConfig};
-use crate::model::{Advice, Critic, Decision, Ready, Rejection, Retell, Spec, Triage, TriageOutput, Verdict};
+use crate::model::{Advice, Critic, Decision, Issue, Ready, Rejection, Retell, Role, Spec, Triage, TriageOutput, Verdict};
 use crate::settings::Settings;
 use crate::store::{read_state, write_json, write_state, Stage, StepStatus};
 use crate::Result;
@@ -77,7 +77,9 @@ fn parse<T: DeserializeOwned>(v: &Value) -> Result<T> {
     Ok(serde_json::from_value(v.clone())?)
 }
 
-fn validate_fish(name: &str, text: &str) -> Result<Value> {
+/// Parses a goldfish's output; the spec goldfish must answer every one of
+/// the `spec_items` checklist items and explain each failure.
+fn validate_fish(name: &str, text: &str, spec_items: usize) -> Result<Value> {
     let v: Value = serde_json::from_str(text)?;
     match name {
         "retell" => drop(parse::<Retell>(&v)?),
@@ -85,6 +87,9 @@ fn validate_fish(name: &str, text: &str) -> Result<Value> {
         "ready" => drop(parse::<Ready>(&v)?),
         _ => {
             let spec: Spec = parse(&v)?;
+            if spec.checks.len() != spec_items {
+                return Err(format!("spec: answered {} checks, checklist has {spec_items}", spec.checks.len()).into());
+            }
             if spec.checks.iter().any(|c| !c.pass && c.note.trim().is_empty()) {
                 return Err("spec: a failed check has no note".into());
             }
@@ -95,14 +100,20 @@ fn validate_fish(name: &str, text: &str) -> Result<Value> {
 
 /// One goldfish. Invalid output is retried once (PRD §9); a process failure
 /// (quota, login, timeout) is not, so it does not burn quota twice.
-async fn run_fish(name: &'static str, prompt: String, schema: &'static str, cfg: CodexConfig) -> (&'static str, u32, Result<Value>) {
+async fn run_fish(
+    name: &'static str,
+    prompt: String,
+    schema: &'static str,
+    spec_items: usize,
+    cfg: CodexConfig,
+) -> (&'static str, u32, Result<Value>) {
     let mut retries = 0;
     loop {
         let text = match agents::codex(&cfg, prompt.clone(), schema).await {
             Ok(text) => text,
             Err(e) => return (name, retries, Err(e)),
         };
-        match validate_fish(name, &text) {
+        match validate_fish(name, &text, spec_items) {
             Ok(v) => return (name, retries, Ok(v)),
             Err(_) if retries == 0 => retries += 1,
             Err(e) => return (name, retries, Err(format!("invalid output after a retry: {e}").into())),
@@ -143,20 +154,81 @@ pub fn collect_rejections(prd_dir: &Path, current: u32) -> Result<Vec<Rejection>
     Ok(out)
 }
 
-fn validate_triage(v: &Value, round: u32, key_items: usize) -> Result<TriageOutput> {
-    let out: TriageOutput = parse(v)?;
-    let prefix = format!("r{round}-");
-    let mut ids: Vec<&str> = out.issues.iter().map(|i| i.id.as_str()).collect();
-    if ids.iter().any(|id| !id.starts_with(&prefix)) {
-        return Err(format!("issue ids must start with {prefix}").into());
+/// What the triager's output is checked against beyond its schema.
+struct TriageInputs<'a> {
+    round: u32,
+    key_items: usize,
+    spec_items: usize,
+    /// Entry counts of retell `guesses`, critic `issues`, ready `missing`.
+    fish_len: [(&'static str, usize); 3],
+    rejected: &'a [Rejection],
+}
+
+fn role_name(r: Role) -> &'static str {
+    match r {
+        Role::Retell => "retell",
+        Role::Critic => "critic",
+        Role::Ready => "ready",
     }
+}
+
+/// Every issue must trace back to real goldfish entries, and the goldfish
+/// in its `refs` must be exactly its `source` + `also_from`, since those
+/// decide which GO lines it counts toward.
+fn check_refs(i: &Issue, fish_len: &[(&'static str, usize)]) -> Result<()> {
+    if i.refs.is_empty() {
+        return Err(format!("{}: refs is empty", i.id).into());
+    }
+    let mut named = Vec::new();
+    for r in &i.refs {
+        let bad = || format!("{}: ref {r} is not <goldfish>#<index>", i.id);
+        let (name, idx) = r.split_once('#').ok_or_else(bad)?;
+        let idx: usize = idx.parse().map_err(|_| bad())?;
+        let (name, len) = *fish_len.iter().find(|(n, _)| *n == name).ok_or_else(bad)?;
+        if idx >= len {
+            return Err(format!("{}: ref {r} is out of range ({name} has {len} entries)", i.id).into());
+        }
+        named.push(name);
+    }
+    let mut lines: Vec<&str> = std::iter::once(i.source).chain(i.also_from.iter().copied()).map(role_name).collect();
+    for v in [&mut named, &mut lines] {
+        v.sort_unstable();
+        v.dedup();
+    }
+    if named != lines {
+        return Err(format!("{}: refs come from {named:?} but source + also_from is {lines:?}", i.id).into());
+    }
+    Ok(())
+}
+
+fn validate_triage(v: &Value, ctx: &TriageInputs) -> Result<TriageOutput> {
+    let out: TriageOutput = parse(v)?;
+    let prefix = format!("r{}-", ctx.round);
+    for i in &out.issues {
+        let num = i.id.strip_prefix(&prefix).unwrap_or("");
+        if num.len() < 2 || !num.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("issue id {} is not {prefix}NN", i.id).into());
+        }
+        check_refs(i, &ctx.fish_len)?;
+        // A made-up id would silently drop the issue from GO and from the
+        // author's to-do list.
+        if let Some(prev) = &i.rejected_as
+            && !ctx.rejected.iter().any(|r| &r.id == prev)
+        {
+            return Err(format!("{}: rejected_as {prev} is not an earlier rejection", i.id).into());
+        }
+    }
+    let mut ids: Vec<&str> = out.issues.iter().map(|i| i.id.as_str()).collect();
     ids.sort_unstable();
     ids.dedup();
     if ids.len() != out.issues.len() {
         return Err("duplicate issue ids".into());
     }
-    if out.key_decisions.len() != key_items {
-        return Err(format!("scored {} key decisions, list has {key_items}", out.key_decisions.len()).into());
+    if out.key_decisions.len() != ctx.key_items {
+        return Err(format!("scored {} key decisions, list has {}", out.key_decisions.len(), ctx.key_items).into());
+    }
+    if out.spec_checks.len() != ctx.spec_items {
+        return Err(format!("copied {} spec checks, checklist has {}", out.spec_checks.len(), ctx.spec_items).into());
     }
     Ok(out)
 }
@@ -180,6 +252,7 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
     let goldfish_rules = read(&rules.join("hd-goldfish-rules.md"))?;
     let elephant_rules = read(&rules.join("hd-elephant-rules.md"))?;
     let checklist = spec_checklist(&read(&rules.join("hd-prd-rules.md"))?)?;
+    let spec_items = checklist.lines().count();
     let mut state = read_state(round_dir)?;
     let fish_dir = round_dir.join("fish");
     fs::create_dir_all(&fish_dir)?;
@@ -203,7 +276,7 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
             step.status = StepStatus::Running;
             step.error = None;
         }
-        set.spawn(run_fish(name, prompt, schema, cfg.clone()));
+        set.spawn(run_fish(name, prompt, schema, spec_items, cfg.clone()));
         log(format!("{name}: running"));
     }
     if !set.is_empty() {
@@ -252,7 +325,18 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
             .replace("{{ready}}", fish_text("ready")?.trim())
             .replace("{{spec}}", fish_text("spec")?.trim())
             .replace("{{prd}}", prd.trim());
-        let key_items = key_decisions.lines().filter(|l| l.starts_with("- ")).count();
+        let fish_len = [
+            ("retell", serde_json::from_str::<Retell>(&fish_text("retell")?)?.guesses.len()),
+            ("critic", serde_json::from_str::<Critic>(&fish_text("critic")?)?.issues.len()),
+            ("ready", serde_json::from_str::<Ready>(&fish_text("ready")?)?.missing.len()),
+        ];
+        let inputs = TriageInputs {
+            round,
+            key_items: key_decisions.lines().filter(|l| l.starts_with("- ")).count(),
+            spec_items,
+            fish_len,
+            rejected: &rejections,
+        };
         let claude = ClaudeConfig { model: settings.triager_model.clone() };
 
         state.stage = Stage::Triage;
@@ -264,7 +348,7 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
         let mut result = Err::<TriageOutput, crate::Error>("not run".into());
         for attempt in 0..2 {
             result = match agents::claude(&claude, TRIAGE_SYSTEM, prompt.clone(), TRIAGE_SCHEMA).await {
-                Ok(v) => validate_triage(&v, round, key_items),
+                Ok(v) => validate_triage(&v, &inputs),
                 Err(e) => Err(e),
             };
             let retryable = matches!(&result, Err(e) if e.downcast_ref::<agents::ProcessError>().is_none());
@@ -365,9 +449,60 @@ mod tests {
 
     #[test]
     fn fish_validation_rejects_extra_fields_and_noteless_failures() {
-        assert!(validate_fish("critic", r#"{"issues":[]}"#).is_ok());
-        assert!(validate_fish("critic", r#"{"issues":[],"extra":1}"#).is_err());
-        assert!(validate_fish("spec", r#"{"checks":[{"item":"a","pass":false,"note":""}]}"#).is_err());
-        assert!(validate_fish("ready", r#"{"verdict":"GO","reason":"ok","missing":[]}"#).is_ok());
+        assert!(validate_fish("critic", r#"{"issues":[]}"#, 1).is_ok());
+        assert!(validate_fish("critic", r#"{"issues":[],"extra":1}"#, 1).is_err());
+        assert!(validate_fish("spec", r#"{"checks":[{"item":"a","pass":false,"note":""}]}"#, 1).is_err());
+        assert!(validate_fish("spec", r#"{"checks":[{"item":"a","pass":false,"note":"n"}]}"#, 1).is_ok());
+        assert!(validate_fish("spec", r#"{"checks":[{"item":"a","pass":true,"note":""}]}"#, 2).is_err());
+        assert!(validate_fish("ready", r#"{"verdict":"GO","reason":"ok","missing":[]}"#, 1).is_ok());
+    }
+
+    fn triage_json(issue: Issue) -> Value {
+        let mut t = serde_json::to_value(triage_in(3, vec![issue], 1, 1)).unwrap();
+        let o = t.as_object_mut().unwrap();
+        for k in ["round", "key_decision_hits", "key_decision_total"] {
+            o.remove(k);
+        }
+        o.insert("spec_checks".into(), serde_json::json!([{ "item": "a", "pass": true }]));
+        t
+    }
+
+    #[test]
+    fn triage_must_trace_issues_to_goldfish_and_real_rejections() {
+        let rejected = [Rejection {
+            id: "r2-09".into(),
+            section: "§1".into(),
+            title: "t".into(),
+            problem: "p".into(),
+            note: None,
+        }];
+        let ctx = TriageInputs {
+            round: 3,
+            key_items: 1,
+            spec_items: 1,
+            fish_len: [("retell", 1), ("critic", 2), ("ready", 0)],
+            rejected: &rejected,
+        };
+        let check = |edit: &dyn Fn(&mut Issue)| {
+            let mut i = issue("r3-01", Role::Critic, &[Role::Retell], Severity::High, None);
+            i.refs = vec!["critic#1".into(), "retell#0".into()];
+            edit(&mut i);
+            validate_triage(&triage_json(i), &ctx)
+        };
+        assert!(check(&|_| {}).is_ok());
+        assert!(check(&|i| i.rejected_as = Some("r2-09".into())).is_ok());
+        assert!(check(&|i| i.rejected_as = Some("r2-15".into())).is_err(), "made-up rejection");
+        assert!(check(&|i| i.refs.clear()).is_err(), "no refs");
+        assert!(check(&|i| i.refs[0] = "critic#2".into()).is_err(), "index out of range");
+        assert!(check(&|i| i.refs[0] = "critic[1]".into()).is_err(), "bad ref format");
+        assert!(check(&|i| i.also_from.clear()).is_err(), "retell ref but retell not in also_from");
+        assert!(check(&|i| i.id = "r3-1".into()).is_err(), "id is not two digits");
+        assert!(check(&|i| i.id = "r2-01".into()).is_err(), "wrong round");
+
+        let mut spec_short = triage_json(issue("r3-01", Role::Critic, &[], Severity::Low, None));
+        spec_short["issues"][0]["refs"] = serde_json::json!(["critic#0"]);
+        assert!(validate_triage(&spec_short, &ctx).is_ok());
+        spec_short["spec_checks"] = serde_json::json!([]);
+        assert!(validate_triage(&spec_short, &ctx).is_err(), "spec checks missing");
     }
 }

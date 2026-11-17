@@ -60,12 +60,12 @@
           },
           "refs": {
             "type": "array",
-            "description": "Original goldfish entries, e.g. critic#3 (0-based index).",
+            "description": "Every goldfish entry merged into this issue, e.g. critic#3 (0-based index). Never empty; the goldfish named here must be exactly source + also_from.",
             "items": { "type": "string" }
           },
           "rejected_as": {
             "type": ["string", "null"],
-            "description": "Id of the matching earlier rejection, or null."
+            "description": "Id of the matching entry in the earlier-rejections list, or null. Never an id that is not in that list."
           },
           "severity": { "type": "string", "enum": ["high", "medium", "low"] },
           "section": { "type": "string" },

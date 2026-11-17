@@ -16,7 +16,7 @@
         "properties": {
           "section": { "type": "string" },
           "problem": { "type": "string" },
-          "impact": { "type": "string" },
+          "impact": { "type": "string", "description": "What goes wrong if the PRD is built as written." },
           "severity": { "type": "string", "enum": ["high", "medium", "low"] }
         }
       }
