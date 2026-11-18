@@ -76,6 +76,14 @@
   let saving: Promise<void> = Promise.resolve();
   let running = $state<string | null>(null);
   let progressLines = $state<string[]>([]);
+  // Live view of a running round, built from the progress lines the backend
+  // emits ("retell: running", "critic: done", "triage: failed: …").
+  type LiveStep = { status: Step["status"]; start: number | null; end: number | null; error: string | null };
+  const FISH_KEYS = ["retell", "critic", "ready", "spec"];
+  let live = $state<Record<string, LiveStep>>({});
+  let liveRound = $state(0);
+  let runStart = $state(0);
+  let now = $state(Date.now());
   let message = $state<{ text: string; error: boolean } | null>(null);
 
   // Preflight: what a round needs. Nothing is shown while everything passes.
@@ -315,17 +323,73 @@
     }
   }
 
+  function onLiveLine(line: string) {
+    const t = Date.now();
+    if (line.startsWith("pull:")) {
+      if (live.pull) live.pull = { ...live.pull, status: "running", start: t };
+      return;
+    }
+    const m = line.match(/^(retell|critic|ready|spec|triage): (running|done|failed)(?::\s*(.*))?$/);
+    if (!m) return;
+    const [, key, status, error] = m;
+    // The first goldfish starting means the snapshot is in.
+    if (live.pull?.status === "running") live.pull = { ...live.pull, status: "done", end: t };
+    const prev = live[key] ?? { status: "queued", start: null, end: null, error: null };
+    live[key] =
+      status === "running"
+        ? { ...prev, status: "running", start: t, end: null, error: null }
+        : { ...prev, status: status as Step["status"], end: t, error: error ?? null };
+  }
+
+  const clock = (ms: number) => {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  };
+  const took = (st: LiveStep | undefined) =>
+    st?.start ? clock((st.end ?? now) - st.start) : "";
+
+  const liveFish = $derived(FISH_KEYS.map((k) => ({ key: k, name: `${FISH_NAMES[k]}金鱼`, st: live[k] })));
+  const fishDone = $derived(liveFish.filter((f) => f.st?.status === "done").length);
+  const fishSpan = $derived.by(() => {
+    const starts = liveFish.map((f) => f.st?.start).filter((x): x is number => !!x);
+    const ends = liveFish.map((f) => f.st?.end).filter((x): x is number => !!x);
+    return starts.length && ends.length ? clock(Math.max(...ends) - Math.min(...starts)) : "";
+  });
+  const liveHead = $derived(
+    live.triage?.status === "running"
+      ? "正在归类"
+      : live.pull?.status === "running"
+        ? "正在拉取快照"
+        : `正在审稿 · ${fishDone} / ${FISH_KEYS.length} 条金鱼完成`,
+  );
+
   async function run(kind: "start" | "resume") {
     if (!selectedId || running) return;
     if (!(await checkStatus())) return;
     running = selectedId;
     progressLines = [];
+    runStart = now = Date.now();
+    const last = detail?.rounds.at(-1);
+    const fresh = (): LiveStep => ({ status: "queued", start: null, end: null, error: null });
+    if (kind === "start" || !last) {
+      liveRound = (last?.n ?? 0) + 1;
+      live = Object.fromEntries(["pull", ...FISH_KEYS, "triage"].map((k) => [k, fresh()]));
+    } else {
+      // Resume skips finished steps and emits nothing for them.
+      liveRound = last.n;
+      live = Object.fromEntries([
+        ...FISH_KEYS.map((k) => [k, { ...fresh(), status: last.fish_steps[k]?.status === "done" ? "done" : "queued" }]),
+        ["triage", fresh()],
+      ]);
+    }
+    const tick = setInterval(() => (now = Date.now()), 1000);
     try {
       await (kind === "start" ? api.startRound(selectedId) : api.resumeRound(selectedId));
       flash("这一轮跑完了");
     } catch (e) {
       flash(String(e), true);
     } finally {
+      clearInterval(tick);
       running = null;
       issueId = null;
       await loadDetail(false);
@@ -381,7 +445,9 @@
 
   onMount(() => {
     const unlisten = onProgress((p) => {
-      if (p.page_id === running) progressLines = [...progressLines, p.line];
+      if (p.page_id !== running) return;
+      progressLines = [...progressLines, p.line];
+      onLiveLine(p.line);
     });
     checkStatus();
     refresh();
@@ -394,6 +460,30 @@
     };
   });
 </script>
+
+{#snippet liveRow(name: string, st: LiveStep | undefined, indent: boolean, time: string, runningHint = "")}
+  {@const status = st?.status ?? "queued"}
+  <div class="step" class:indent>
+    <div class="step-row">
+      <span class="step-mark {status}" aria-hidden="true">
+        {#if status === "done"}
+          <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        {:else if status === "running"}
+          <span class="spinner"></span>
+        {:else}<span class="dot"></span>{/if}
+      </span>
+      <span class="step-name">{name}</span>
+      <span class="step-status {status}">
+        {status === "running" ? (name === "整理员归类" ? "归类中…" : name.endsWith("快照") ? "拉取中…" : "审稿中…")
+          : status === "done" ? "完成" : status === "failed" ? "失败"
+          : name === "整理员归类" ? "等金鱼都审完" : "排队"}
+      </span>
+      <span class="step-time">{time || took(st)}</span>
+    </div>
+    {#if status === "running" && runningHint}<div class="step-error muted">{runningHint}</div>{/if}
+    {#if st?.error}<div class="step-error mono">{st.error}</div>{/if}
+  </div>
+{/snippet}
 
 {#snippet dots()}
   <span class="dots" aria-hidden="true"><span></span><span></span><span></span></span>
@@ -486,11 +576,35 @@
         </section>
       {:else if running === selectedId}
         <section class="running">
-          <h1>{selectedItem?.title}</h1>
-          <p class="muted">4 条金鱼并行审稿，整理员随后汇总，通常 2～3 分钟。</p>
-          <ol class="log">
-            {#each progressLines as line}<li>{line}</li>{/each}
-          </ol>
+          <div class="muted small-text">第 {liveRound} 轮</div>
+          <h1 class="running-title">{selectedItem?.title}</h1>
+          <div class="live">
+            <div class="live-head">
+              <span class="strong">{liveHead}</span>
+              <span class="muted live-clock">已用时 {clock(now - runStart)}</span>
+            </div>
+            <div class="steps">
+              {#if live.pull}
+                {@render liveRow("从 Notion 拉取快照", live.pull, false, "")}
+              {/if}
+              {#if live.triage?.status === "queued"}
+                <div class="step"><div class="step-row"><span class="step-mark"></span><span class="step-name">{FISH_KEYS.length} 条金鱼一起审稿</span></div></div>
+                {#each liveFish as f (f.key)}
+                  {@render liveRow(f.name, f.st, true, "")}
+                {/each}
+              {:else}
+                {@render liveRow(`${FISH_KEYS.length} 条金鱼一起审稿`, { status: "done", start: null, end: null, error: null }, false, fishSpan)}
+              {/if}
+              {@render liveRow("整理员归类", live.triage, false, "", "把四条金鱼的发现合并、去重，给每条写建议")}
+            </div>
+            <details class="live-log">
+              <summary>详细日志</summary>
+              <ol class="log">
+                {#each progressLines as line}<li>{line}</li>{/each}
+              </ol>
+            </details>
+          </div>
+          <p class="live-foot">通常 2～3 分钟。可以先去做别的事；中途关掉 app 也没关系，下次打开能接着跑没完成的部分。</p>
         </section>
       {:else if !detail || detail.rounds.length === 0}
         <section class="empty">
@@ -916,8 +1030,23 @@
   .step-status.failed { color: #b3362b; font-weight: 600; }
   .step-status.running { color: #b85414; font-weight: 600; }
   .step-error { margin: 2px 0 0 26px; color: #5f6670; white-space: pre-wrap; word-break: break-word; }
+  .running-title { margin-top: 0; }
+  .live { width: min(520px, 100%); box-sizing: border-box; padding: 14px 20px 16px; text-align: left; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; }
+  .live-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .live-clock, .step-time { font-variant-numeric: tabular-nums; }
+  .live-clock { font-size: 12px; }
+  .step.indent { padding-left: 26px; }
+  .step-time { flex: none; width: 40px; text-align: right; font-size: 11px; color: #8a8f96; }
+  .step-status.queued { color: #8a8f96; }
+  .spinner { width: 12px; height: 12px; box-sizing: border-box; border-radius: 50%; border: 1.6px solid #e3d3c4; border-top-color: #b85414; animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+  .live-log { margin-top: 10px; }
+  .live-log summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #2b3240; }
+  .live-log .log { margin-top: 8px; border: none; background: #fbfaf7; }
+  .live-foot { margin: 0; max-width: 520px; font-size: 11px; line-height: 1.6; color: #8a8f96; }
   .resume { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
-  .log { width: min(560px, 100%); max-height: 50vh; overflow-y: auto; text-align: left; margin: 0; padding: 12px 12px 12px 32px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 8px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.8; }
+  .log { width: 100%; box-sizing: border-box; max-height: 40vh; overflow-y: auto; text-align: left; margin: 0; padding: 12px 12px 12px 32px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 8px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.8; }
 
   .tabs { flex: none; display: flex; padding: 0 22px 14px; overflow-x: auto; }
   .tab { flex: 1 1 0; min-width: 150px; min-height: 58px; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 8px 14px; text-align: left; background: #f9f8f4; border: 1px solid rgba(0,0,0,.1); margin-right: -1px; color: #1f2328; cursor: pointer; }
