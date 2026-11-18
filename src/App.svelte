@@ -1509,22 +1509,22 @@
   .bad-text { color: #b3362b; font-size: 12px; }
   .dialog-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px 16px; border-top: 1px solid rgba(0,0,0,.08); }
   .fresh { flex: 1; min-height: 0; overflow-y: auto; padding: 22px; }
-  .fresh-inner { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
-  .fresh-title { margin: 4px 0 0; font-size: 20px; font-weight: 600; }
+  .fresh-inner { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  .fresh-title { margin: 4px 0 0; font-size: 22px; font-weight: 600; }
   .fresh .link-btn.small-text { font-size: 11px; }
-  .prd-card { padding: 14px 16px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; }
+  .prd-card { padding: 16px 18px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; }
   .prd-card p { margin: 0; }
-  .sections { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; row-gap: 4px; font-size: 12px; color: #2b3240; }
-  .key-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding: 8px 10px; border-radius: 7px; background: #f4f3ef; font-size: 12px; }
+  .sections { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; row-gap: 6px; font-size: 13px; color: #2b3240; }
+  .key-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding: 9px 12px; border-radius: 7px; background: #f4f3ef; font-size: 13px; }
   .key-row.bad { background: none; border: 1px dashed #e3b5b0; }
   .key-mark { flex: none; }
   .key-bad { color: #b3362b; font-weight: 600; }
-  .key-hint { font-size: 11px; }
+  .key-hint { font-size: 12px; }
   .key-copy { margin-left: auto; }
-  .env-line { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #5f6670; }
+  .env-line { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #5f6670; }
   .env-recheck { margin-left: auto; }
   .fresh-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding-top: 14px; border-top: 1px solid rgba(0,0,0,.08); }
-  .flow { font-size: 12px; color: #5f6670; }
+  .flow { font-size: 13px; color: #5f6670; }
   .flow .faint { color: #8a8f96; }
   .fresh-go { margin-left: auto; display: inline-flex; align-items: center; gap: 10px; }
 </style>
