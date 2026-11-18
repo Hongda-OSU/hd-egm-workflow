@@ -204,7 +204,60 @@
     return { text: "待我决定", color: "#b85414" };
   }
 
+  // PRD §6.6; must match HIT_THRESHOLD in egm-core's review.rs.
+  const HIT_THRESHOLD = 0.9;
+  const hitRate = (t: { key_decision_hits: number; key_decision_total: number }) =>
+    t.key_decision_total ? t.key_decision_hits / t.key_decision_total : 0;
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
+
+  // Same rule as egm-core: a manual decision wins, else an earlier rejection.
+  const isRejected = (i: Issue) => {
+    const d = decisionOf(i.id);
+    return d ? d === "reject" : !!i.rejected_as;
+  };
+
+  // Why each line is not GO, in the terms of §6.6: unrejected highs counted
+  // toward it (split into ones already accepted and ones still open) and,
+  // for retell, the key-decision hit rate.
+  const lines = $derived.by(() => {
+    if (!triage || !round) return [];
+    const rate = hitRate(triage);
+    return ROLES.map((role) => {
+      const highs = triage.issues.filter((i) => i.severity === "high" && foundBy(i).includes(role) && !isRejected(i));
+      const toFix = highs.filter((i) => decisionOf(i.id) === "accept").length;
+      const open = highs.length - toFix;
+      const reasons: string[] = [];
+      if (toFix) reasons.push(`${toFix} 条高严重度要改`);
+      if (open) reasons.push(`${open} 条高严重度待决定`);
+      if (role === "retell" && rate < HIT_THRESHOLD) reasons.push(`命中率 ${pct(rate)}，不到 ${pct(HIT_THRESHOLD)}`);
+      return { role, verdict: round.verdicts?.[role], reasons, open, toFix };
+    });
+  });
+
+  const verdictNote = $derived.by(() => {
+    const v = round?.verdicts?.prd;
+    if (!v) return "";
+    if (v === "GO") return "三条线都过了，这份 PRD 可以收尾";
+    if (lines.some((l) => l.open)) return "先把高严重度的问题拍完";
+    if (lines.some((l) => l.toFix)) return "把接受的问题改进 PRD，下一轮再看";
+    if (lines.some((l) => l.reasons.length)) return "关键决策没讲对，把 PRD 写清楚再审一轮";
+    if (round?.warnings.length) return "有块转换警告，见下方";
+    return "";
+  });
+
+  function specNote(fish: Record<string, any>, item: string): string {
+    const c = fish.spec?.checks?.find((x: { item: string }) => x.item === item);
+    return typeof c?.note === "string" ? c.note : "";
+  }
+
+  /** Renders **bold** and `code` from rule text; everything else is escaped. */
+  function inlineMd(text: string): string {
+    const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return esc.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`(.+?)`/g, "<code>$1</code>");
+  }
+
   function verdictStyle(v: Verdict | undefined) {
+    if (!v) return "color:#5f6670;background:#ecebe5";
     return v === "GO" ? "color:#1f7a4d;background:#e6f4ec" : "color:#b3362b;background:#fbeae8";
   }
 
@@ -678,40 +731,76 @@
     <aside class="right">
       {#if round?.triage}
         {@const t = round.triage}
+        {@const prd = round.verdicts?.prd}
+        {@const rate = hitRate(t)}
+        {@const counted = detail?.rounds.filter((r) => r.triage) ?? []}
+        {@const at = counted.findIndex((r) => r.n === round.n)}
+        {@const diff = at > 0 ? t.issues.length - counted[at - 1].triage!.issues.length : null}
+        {@const fails = t.spec_checks.filter((c) => !c.pass)}
+        {@const passes = t.spec_checks.filter((c) => c.pass)}
         <section>
-          <h2 class="label">第 {round.n} 轮 · 三条金鱼</h2>
-          {#each [["复述金鱼", round.verdicts?.retell], ["找茬金鱼", round.verdicts?.critic], ["开工金鱼", round.verdicts?.ready]] as [name, v]}
-            <div class="row"><span>{name}</span><span class="verdict" style={verdictStyle(v as Verdict)}>{v ?? "—"}</span></div>
+          <h2 class="label">第 {round.n} 轮结论</h2>
+          <div class="verdict-card">
+            <span class="verdict-big" class:go={prd === "GO"}>{prd ?? "—"}</span>
+            {#if verdictNote}<span class="muted verdict-note">{verdictNote}</span>{/if}
+          </div>
+          {#each lines as l (l.role)}
+            <div class="line">
+              <div class="line-top">
+                <span>{ROLE[l.role].label}金鱼</span>
+                <span class="verdict" style={verdictStyle(l.verdict)}>{l.verdict ?? "—"}</span>
+              </div>
+              {#if l.verdict !== "GO" && l.reasons.length}<div class="line-why muted">{l.reasons.join(" · ")}</div>{/if}
+            </div>
           {/each}
-          <div class="row strong"><span>整份 PRD</span><span class="verdict" style={verdictStyle(round.verdicts?.prd)}>{round.verdicts?.prd ?? "—"}</span></div>
           {#each round.warnings as w}<p class="warn">{w}</p>{/each}
         </section>
         <section>
           <h2 class="label">关键决策命中率</h2>
-          <div class="big-num">{t.key_decision_hits}<span class="muted"> / {t.key_decision_total} 条</span></div>
-          <p class="muted small-text">复述金鱼说对了关键决策清单里的几条，部分说对记 0.5；≥ 90% 才达标。</p>
-          {#each t.key_decisions.filter((k) => k.result !== "hit") as k}
-            <p class="kd"><span style="color:{k.result === 'miss' ? '#b3362b' : '#a86b00'}">{k.result === "miss" ? "漏" : "半"}</span>{k.item}</p>
-          {/each}
-        </section>
-        <section>
-          <h2 class="label">每轮问题数</h2>
-          <div class="bars">
-            {#each detail?.rounds.filter((r) => r.triage) ?? [] as r}
-              {@const c = r.triage!.issues.length}
-              <div class="bar">
-                <span class="strong">{c}</span>
-                <span class="fill" style="height:{Math.max(6, Math.round((c / maxIssues) * 64))}px;background:{r.n === round.n ? '#b85414' : '#d9d6cd'}" aria-hidden="true"></span>
-                <span class="muted small-text">R{r.n}</span>
-              </div>
-            {/each}
+          <div class="hit">
+            <span class="hit-num" class:ok={rate >= HIT_THRESHOLD}>{pct(rate)}</span>
+            <span class="muted small-text">{t.key_decision_hits} / {t.key_decision_total} 条 · 要 {pct(HIT_THRESHOLD)}</span>
           </div>
+          <div class="meter" title="部分说对记 0.5 条">
+            <span class="meter-fill" class:ok={rate >= HIT_THRESHOLD} style="width:{Math.min(100, rate * 100)}%"></span>
+            <span class="meter-mark" style="left:{HIT_THRESHOLD * 100}%" aria-hidden="true"></span>
+          </div>
+          {#if t.key_decisions.some((k) => k.result !== "hit")}
+            {@const missed = t.key_decisions.filter((k) => k.result !== "hit")}
+            <div class="sub-label">复述金鱼没说对的 {missed.length} 条</div>
+            {#each missed as k}
+              <p class="kd"><span class="kd-tag" class:miss={k.result === "miss"}>{k.result === "miss" ? "漏了" : "说对一半"}</span>{k.item}</p>
+            {/each}
+          {/if}
         </section>
         <section>
-          <h2 class="label">规范达标 · {t.spec_checks.filter((c) => c.pass).length} / {t.spec_checks.length}</h2>
-          {#each t.spec_checks as c}
-            <div class="spec"><span style="color:{c.pass ? '#1f7a4d' : '#b3362b'}" aria-hidden="true">{c.pass ? "✓" : "✕"}</span><span>{c.item}</span></div>
+          <h2 class="label">每轮问题数{diff === null ? "" : diff < 0 ? ` · 比上一轮少 ${-diff} 条` : diff > 0 ? ` · 比上一轮多 ${diff} 条` : " · 跟上一轮一样"}</h2>
+          {#each counted as r (r.n)}
+            {@const c = r.triage!.issues.length}
+            <div class="hbar" class:on={r.n === round.n}>
+              <span class="muted small-text">第 {r.n} 轮</span>
+              <span class="hbar-track"><span class="hbar-fill" style="width:{(c / maxIssues) * 100}%"></span></span>
+              <span class="hbar-num">{c} 条</span>
+            </div>
           {/each}
+        </section>
+        <section>
+          <h2 class="label">规范达标 · {passes.length} / {t.spec_checks.length} <span class="label-note">· 不影响 GO</span></h2>
+          {#each fails as c}
+            {@const why = specNote(round.fish, c.item)}
+            <div class="spec-fail">
+              <div class="spec-line"><span class="spec-x" aria-hidden="true">✕</span><span>{@html inlineMd(c.item)}</span></div>
+              {#if why}<p class="spec-note muted">{why}</p>{/if}
+            </div>
+          {/each}
+          {#if passes.length}
+            <details class="spec-pass">
+              <summary>通过的 {passes.length} 条</summary>
+              {#each passes as c}
+                <div class="spec-line"><span class="spec-ok" aria-hidden="true">✓</span><span>{@html inlineMd(c.item)}</span></div>
+              {/each}
+            </details>
+          {/if}
         </section>
       {:else if !booting}
         <p class="muted small-text">跑完一轮后，这里显示三条金鱼的结论、命中率和规范达标。</p>
@@ -901,15 +990,41 @@
 
   .right { flex: 0 0 272px; min-height: 0; overflow-y: auto; background: #fbfaf7; border-left: 1px solid rgba(0,0,0,.08); padding: 16px; display: flex; flex-direction: column; gap: 18px; }
   .right section { display: flex; flex-direction: column; }
-  .row { display: flex; justify-content: space-between; align-items: center; min-height: 32px; border-bottom: 1px solid rgba(0,0,0,.06); }
+  .verdict-card { display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; }
+  .verdict-big { flex: none; font-size: 15px; font-weight: 700; color: #b3362b; }
+  .verdict-big.go { color: #1f7a4d; }
+  .verdict-note { font-size: 12px; line-height: 1.5; }
+  .line { padding: 8px 0; border-bottom: 1px solid rgba(0,0,0,.06); }
+  .line-top { display: flex; justify-content: space-between; align-items: center; }
+  .line-why { margin-top: 2px; font-size: 11px; line-height: 1.5; }
   .warn { margin: 6px 0 0; font-size: 11px; color: #a86b00; }
-  .big-num { font-size: 32px; font-weight: 600; }
-  .big-num .muted { font-size: 13px; font-weight: 400; }
-  .kd { display: flex; gap: 6px; margin: 4px 0 0; font-size: 11px; line-height: 1.5; color: #2b3240; }
-  .kd span { flex: none; font-weight: 700; }
-  .bars { display: flex; align-items: flex-end; gap: 14px; height: 92px; }
-  .bar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 4px; height: 100%; }
-  .fill { width: 100%; border-radius: 4px 4px 0 0; }
-  .spec { display: flex; gap: 8px; align-items: flex-start; min-height: 24px; font-size: 12px; line-height: 1.5; }
-  .spec span:first-child { flex: none; width: 14px; font-weight: 700; }
+  .hit { display: flex; align-items: baseline; gap: 8px; }
+  .hit-num { font-size: 28px; font-weight: 600; color: #b3362b; }
+  .hit-num.ok { color: #1f7a4d; }
+  .meter { position: relative; height: 6px; margin-top: 8px; background: #ecebe5; border-radius: 3px; }
+  .meter-fill { display: block; height: 100%; background: #b3362b; border-radius: 3px; }
+  .meter-fill.ok { background: #1f7a4d; }
+  .meter-mark { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; background: #1f2328; }
+  .sub-label { margin-top: 12px; font-size: 11px; font-weight: 600; color: #5f6670; }
+  .kd { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: #2b3240; }
+  .kd-tag { margin-right: 4px; font-size: 11px; font-weight: 600; border-radius: 4px; padding: 1px 6px; color: #a86b00; background: #fbf1dc; }
+  .kd-tag.miss { color: #b3362b; background: #fbeae8; }
+  .hbar { display: flex; align-items: center; gap: 8px; min-height: 22px; }
+  .hbar > .muted { flex: none; width: 44px; }
+  .hbar-track { flex: 1; height: 8px; }
+  .hbar-fill { display: block; height: 100%; background: #d9d6cd; border-radius: 4px; }
+  .hbar.on .hbar-fill { background: #b85414; }
+  .hbar-num { flex: none; width: 40px; text-align: right; font-size: 12px; }
+  .hbar.on .hbar-num { font-weight: 600; }
+  .label-note { font-weight: 400; }
+  .spec-fail { padding: 7px 0; border-bottom: 1px solid rgba(0,0,0,.06); }
+  .spec-line { display: flex; gap: 8px; font-size: 12px; line-height: 1.5; }
+  .spec-line :global(code) { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; background: #ecebe5; padding: 0 4px; border-radius: 3px; }
+  .spec-line :global(b) { font-weight: 600; }
+  .spec-x { flex: none; width: 10px; font-weight: 700; color: #b3362b; }
+  .spec-ok { flex: none; width: 10px; font-weight: 700; color: #1f7a4d; }
+  .spec-note { margin: 2px 0 0 18px; font-size: 11px; line-height: 1.5; }
+  .spec-pass { margin-top: 8px; }
+  .spec-pass summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #2b3240; }
+  .spec-pass .spec-line { margin-top: 6px; }
 </style>

@@ -193,6 +193,14 @@ async fn get_prd(page_id: String) -> CmdResult<Option<PrdDetail>> {
                 Some((f.to_string(), serde_json::from_str(&text).ok()?))
             })
             .collect();
+        let triage = review::read_triage(&rd).ok();
+        let decisions = review::read_decisions(&rd).unwrap_or_default();
+        // Verdicts are only stored once a decision is made, so a round decided
+        // before that, or not decided yet, has none on disk. Show what the
+        // current decisions give instead of nothing; nothing is written here.
+        let verdicts = state.verdicts.or_else(|| {
+            triage.as_ref().map(|t| review::compute_verdicts(t, &decisions, &state.warnings))
+        });
         rounds.push(RoundView {
             n,
             latest: Some(n) == last,
@@ -200,9 +208,9 @@ async fn get_prd(page_id: String) -> CmdResult<Option<PrdDetail>> {
             fish_steps: state.fish,
             triage_step: state.triage,
             warnings: state.warnings,
-            triage: review::read_triage(&rd).ok(),
-            decisions: review::read_decisions(&rd).unwrap_or_default(),
-            verdicts: state.verdicts,
+            triage,
+            decisions,
+            verdicts,
             has_handoff: rd.join("handoff.md").is_file(),
             handoff_stale: review::handoff_stale(&rd),
             fish,
