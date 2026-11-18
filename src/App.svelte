@@ -933,7 +933,7 @@
             </div>
 
             <div class="fresh-foot">
-              <span class="flow">拉取快照 → 4 条金鱼审稿 → 整理员归类 → 你拍板<span class="faint"> · 约 2～3 分钟，用订阅额度</span></span>
+              <span class="flow">拉取快照 → 4 条金鱼审稿 → 整理员归类 → 你拍板<span class="faint">&nbsp;· 约 2～3 分钟，用订阅额度</span></span>
               <span class="fresh-go">
                 {#if keyBad}<span class="blocked-hint">先处理清单</span>{:else if blocked}<span class="blocked-hint">先解决上面的问题</span>{/if}
                 <button type="button" class="secondary small-btn" disabled={!!running || blocked || keyBad} onclick={() => run("start")}>
@@ -1509,7 +1509,7 @@
   .bad-text { color: #b3362b; font-size: 12px; }
   .dialog-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px 16px; border-top: 1px solid rgba(0,0,0,.08); }
   .fresh { flex: 1; min-height: 0; overflow-y: auto; padding: 22px; }
-  .fresh-inner { max-width: 640px; display: flex; flex-direction: column; gap: 14px; }
+  .fresh-inner { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
   .fresh-title { margin: 4px 0 0; font-size: 20px; font-weight: 600; }
   .fresh .link-btn.small-text { font-size: 11px; }
   .prd-card { padding: 14px 16px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; }
