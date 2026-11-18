@@ -2,6 +2,7 @@
 //! storage. Shared by the CLI now and the Tauri app later.
 
 pub mod agents;
+pub mod diff;
 pub mod markdown;
 pub mod model;
 pub mod notion;

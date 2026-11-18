@@ -1,5 +1,10 @@
 //! Local run storage (PRD §7): `<data_dir>/<slug>/prd.json` and
 //! `round-<N>/`. Earlier rounds are never overwritten.
+//!
+//! Reviewing a PRD again from scratch starts a new review: review 1 keeps
+//! its rounds directly under `<slug>/` (where they always were), review K
+//! (K >= 2) under `<slug>/review-K/`. Rounds are numbered from 1 in each
+//! review, and rejections carry over only within a review.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -33,8 +38,17 @@ pub struct PrdMeta {
     pub notion_page_id: String,
     pub title: String,
     pub slug: String,
+    /// Rounds in the current review.
     pub rounds: u32,
     pub status: PrdStatus,
+    /// Number of reviews; the last one is current. Missing in prd.json
+    /// files written before reviews existed, which have exactly one.
+    #[serde(default = "one")]
+    pub reviews: u32,
+}
+
+fn one() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +142,35 @@ fn new_prd_dir(data_dir: &Path, title: &str, page_id: &str) -> PathBuf {
     data_dir.join(format!("{base}-{}", id.get(8..).unwrap_or(&id)))
 }
 
+/// Directory holding the `round-N` dirs of review `k`.
+pub fn review_dir(prd_dir: &Path, k: u32) -> PathBuf {
+    if k <= 1 { prd_dir.to_path_buf() } else { prd_dir.join(format!("review-{k}")) }
+}
+
+/// The current review's directory (review 1 when prd.json is missing).
+pub fn current_review_dir(prd_dir: &Path) -> PathBuf {
+    review_dir(prd_dir, read_meta(prd_dir).map_or(1, |m| m.reviews))
+}
+
+/// The PRD directory a round dir belongs to: the nearest ancestor with a
+/// prd.json, else the round's parent.
+pub fn prd_dir_of(round_dir: &Path) -> Option<PathBuf> {
+    round_dir
+        .ancestors()
+        .skip(1)
+        .find(|p| p.join("prd.json").is_file())
+        .or_else(|| round_dir.parent())
+        .map(Path::to_path_buf)
+}
+
+/// True when `round_dir` is the latest round of its PRD's current review;
+/// only that round can be decided.
+pub fn is_latest(round_dir: &Path) -> bool {
+    prd_dir_of(round_dir)
+        .and_then(|p| latest_round(&current_review_dir(&p)))
+        .is_some_and(|l| l == round_dir)
+}
+
 pub fn read_meta(prd_dir: &Path) -> Option<PrdMeta> {
     let text = fs::read_to_string(prd_dir.join("prd.json")).ok()?;
     serde_json::from_str(&text).ok()
@@ -168,7 +211,7 @@ pub fn recover_stale(data_dir: &Path) -> Result<usize> {
         if lock_holder(&prd.path().join(LOCK)).is_some_and(pid_alive) {
             continue;
         }
-        let Some(round_dir) = latest_round(&prd.path()) else { continue };
+        let Some(round_dir) = latest_round(&current_review_dir(&prd.path())) else { continue };
         let Ok(mut state) = read_state(&round_dir) else { continue };
         let mut changed = false;
         for step in state.fish.values_mut().chain(std::iter::once(&mut state.triage)) {
@@ -343,8 +386,9 @@ pub struct PulledRound {
 
 /// Fetch stage of a round: writes `round-<N>/` with prd.md, key-decisions.md,
 /// rules/ and round.json. Everything goes to a temp dir first and is moved
-/// into place only when complete.
-pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str) -> Result<PulledRound> {
+/// into place only when complete. With `new_review`, the round is round 1
+/// of a new review; the PRD must already have rounds.
+pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str, new_review: bool) -> Result<PulledRound> {
     let page = notion.page(page_id).await?;
     let data_dir = settings.data_dir();
     let prd_dir = find_prd_dir(&data_dir, &page.id)
@@ -358,7 +402,11 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str) -> Result
         slug: prd_dir.file_name().unwrap_or_default().to_string_lossy().into_owned(),
         rounds: 0,
         status: PrdStatus::NotReviewed,
+        reviews: 1,
     });
+    if new_review && rounds(&review_dir(&prd_dir, meta.reviews)).is_empty() {
+        return Err("this PRD has no rounds yet, so there is nothing to review again".into());
+    }
     meta.title = page.title.clone();
 
     let snap = snapshot(notion, settings, &page.id).await?;
@@ -368,11 +416,14 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str) -> Result
         warnings.extend(r.warnings.iter().map(|w| format!("rules/{name}: {w}")));
     }
 
-    let mut round = meta.rounds + 1;
-    while prd_dir.join(format!("round-{round}")).exists() {
+    let review = if new_review { meta.reviews + 1 } else { meta.reviews };
+    let rdir = review_dir(&prd_dir, review);
+    fs::create_dir_all(&rdir)?;
+    let mut round = if new_review { 1 } else { meta.rounds + 1 };
+    while rdir.join(format!("round-{round}")).exists() {
         round += 1;
     }
-    let tmp = prd_dir.join(format!(".round-{round}.tmp"));
+    let tmp = rdir.join(format!(".round-{round}.tmp"));
     if tmp.exists() {
         fs::remove_dir_all(&tmp)?;
     }
@@ -397,8 +448,9 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str) -> Result
     };
     write_json(&tmp.join("round.json"), &state)?;
 
-    let dir = prd_dir.join(format!("round-{round}"));
+    let dir = rdir.join(format!("round-{round}"));
     fs::rename(&tmp, &dir)?;
+    meta.reviews = review;
     meta.rounds = round;
     meta.status = PrdStatus::InReview;
     write_json(&prd_dir.join("prd.json"), &meta)?;
@@ -435,9 +487,36 @@ mod tests {
             slug: name.into(),
             rounds: 1,
             status: PrdStatus::InReview,
+            reviews: 1,
         };
         write_json(&dir.join("prd.json"), &meta).unwrap();
         dir
+    }
+
+    #[test]
+    fn later_reviews_live_in_their_own_dir_and_only_their_last_round_is_latest() {
+        let tmp = TempDir::new("reviews");
+        let prd = claim(tmp.path(), "p", EGM);
+        for d in ["round-1", "round-2", "review-2/round-1"] {
+            fs::create_dir_all(prd.join(d)).unwrap();
+        }
+        assert_eq!(rounds(&prd).len(), 2, "review-2 is not a round of review 1");
+        assert_eq!(current_review_dir(&prd), prd);
+        assert!(is_latest(&prd.join("round-2")));
+
+        let mut meta = read_meta(&prd).unwrap();
+        meta.reviews = 2;
+        write_json(&prd.join("prd.json"), &meta).unwrap();
+        assert_eq!(current_review_dir(&prd), prd.join("review-2"));
+        assert!(!is_latest(&prd.join("round-2")));
+        assert!(is_latest(&prd.join("review-2/round-1")));
+        assert_eq!(prd_dir_of(&prd.join("review-2/round-1")), Some(prd));
+    }
+
+    #[test]
+    fn prd_json_without_reviews_means_one_review() {
+        let text = r#"{"notion_page_id":"x","title":"t","slug":"s","rounds":7,"status":"go"}"#;
+        assert_eq!(serde_json::from_str::<PrdMeta>(text).unwrap().reviews, 1);
     }
 
     #[test]

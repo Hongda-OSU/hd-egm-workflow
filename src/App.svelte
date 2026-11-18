@@ -6,13 +6,16 @@
     resolveRef,
     type Advice,
     type AppStatus,
+    type DiffLine,
     type Issue,
+    type IssueDiff,
     type Models,
     type Outline,
     type PrdDetail,
     type PrdItem,
     type PrdList,
     type Role,
+    type RoundRef,
     type RuleItem,
     type SettingsView,
     type Step,
@@ -68,6 +71,10 @@
   let booting = $state(true);
   let selectedId = $state<string | null>(null);
   let detail = $state<PrdDetail | null>(null);
+  // Which review of the selected PRD is shown; null is the current one.
+  let viewReview = $state<number | null>(null);
+  let reviewMenu = $state(false);
+  let reviewConfirm = $state(false);
   let roundIdx = $state(0);
   let src = $state<"all" | Role>("all");
   let issueId = $state<string | null>(null);
@@ -84,7 +91,7 @@
   type LiveStep = { status: Step["status"]; start: number | null; end: number | null; error: string | null };
   const FISH_KEYS = ["retell", "critic", "ready", "spec"];
   let live = $state<Record<string, LiveStep>>({});
-  let liveRound = $state(0);
+  let liveLabel = $state("");
   let runStart = $state(0);
   let now = $state(Date.now());
   let message = $state<{ text: string; error: boolean } | null>(null);
@@ -182,9 +189,12 @@
   const undecided = $derived(
     triage ? triage.issues.filter((i) => !i.rejected_as && decisionOf(i.id) === null) : [],
   );
+  // Earlier reviews are read-only history: no starting, deciding or resuming.
+  const viewingCurrent = $derived(!!detail && detail.review === detail.current_review);
   // Once the latest round is handed off, starting the next one becomes the
   // page's main action; before that, deciding issues is.
-  const readyForNext = $derived(!!detail?.rounds.at(-1)?.has_handoff);
+  const readyForNext = $derived(viewingCurrent && !!detail?.rounds.at(-1)?.has_handoff);
+  const isGo = $derived(viewingCurrent && detail?.status === "go");
   const nextRound = $derived((detail?.rounds.at(-1)?.n ?? 0) + 1);
   const unfinished = $derived(
     round && round.latest && !round.triage && (round.stage === "failed" || round.stage === "fish" || round.stage === "triage"),
@@ -217,7 +227,7 @@
       // Without a decision the note just waits and goes out with the click.
       if (!d || note.trim() === saved.trim()) return;
       try {
-        await api.decide(detail.page_id, round.n, cur.id, d, note.trim() || null);
+        await api.decide(detail.page_id, detail.review, round.n, cur.id, d, note.trim() || null);
         await loadDetail(true);
       } catch (e) {
         flash(String(e), true);
@@ -406,7 +416,7 @@
   async function loadDetail(keepPosition: boolean) {
     const id = selectedId;
     if (!id) return;
-    const loaded = await api.getPrd(id);
+    const loaded = await api.getPrd(id, viewReview);
     // Clicking through PRDs quickly can resolve loads out of order; a reply
     // for a PRD that is no longer selected must not replace the current one.
     if (selectedId !== id) return;
@@ -465,6 +475,8 @@
 
   async function select(id: string) {
     selectedId = id;
+    viewReview = null;
+    reviewMenu = false;
     issueId = null;
     src = "all";
     try {
@@ -514,20 +526,25 @@
         : `正在审稿 · ${fishDone} / ${FISH_KEYS.length} 条金鱼完成`,
   );
 
-  async function run(kind: "start" | "resume") {
+  async function run(kind: "start" | "resume" | "review") {
     if (!selectedId || running) return;
     if (!(await checkStatus())) return;
     running = selectedId;
     progressLines = [];
     runStart = now = Date.now();
-    const last = detail?.rounds.at(-1);
+    const last = viewingCurrent ? detail?.rounds.at(-1) : undefined;
     const fresh = (): LiveStep => ({ status: "queued", start: null, end: null, error: null });
-    if (kind === "start" || !last) {
-      liveRound = (last?.n ?? 0) + 1;
+    const curReview = detail?.current_review ?? 1;
+    const reviewPrefix = (k: number) => (k > 1 ? `第 ${k} 次审稿 · ` : "");
+    if (kind === "review") {
+      liveLabel = `${reviewPrefix(curReview + 1)}第 1 轮`;
+      live = Object.fromEntries(["pull", ...FISH_KEYS, "triage"].map((k) => [k, fresh()]));
+    } else if (kind === "start" || !last) {
+      liveLabel = `${reviewPrefix(curReview)}第 ${(last?.n ?? 0) + 1} 轮`;
       live = Object.fromEntries(["pull", ...FISH_KEYS, "triage"].map((k) => [k, fresh()]));
     } else {
       // Resume skips finished steps and emits nothing for them.
-      liveRound = last.n;
+      liveLabel = `${reviewPrefix(curReview)}第 ${last.n} 轮`;
       live = Object.fromEntries([
         ...FISH_KEYS.map((k) => [k, { ...fresh(), status: last.fish_steps[k]?.status === "done" ? "done" : "queued" }]),
         ["triage", fresh()],
@@ -535,7 +552,11 @@
     }
     const tick = setInterval(() => (now = Date.now()), 1000);
     try {
-      await (kind === "start" ? api.startRound(selectedId) : api.resumeRound(selectedId));
+      await (kind === "start"
+        ? api.startRound(selectedId)
+        : kind === "review"
+          ? api.startReview(selectedId)
+          : api.resumeRound(selectedId));
       flash("这一轮跑完了");
     } catch (e) {
       flash(String(e), true);
@@ -543,6 +564,7 @@
       clearInterval(tick);
       running = null;
       issueId = null;
+      viewReview = null;
       await loadDetail(false);
       await loadList();
     }
@@ -556,7 +578,7 @@
     // can be typed, and changing an earlier decision stays put too.
     const advance = d === "accept" && decisionOf(id) === null && !cur.rejected_as;
     try {
-      await api.decide(detail.page_id, round.n, id, d, note.trim() || null);
+      await api.decide(detail.page_id, detail.review, round.n, id, d, note.trim() || null);
       const at = shown.findIndex((i) => i.id === id);
       await loadDetail(true);
       issueId = id;
@@ -577,7 +599,7 @@
   async function handoff() {
     if (!detail || !round) return;
     try {
-      await api.makeHandoff(detail.page_id, round.n);
+      await api.makeHandoff(detail.page_id, detail.review, round.n);
       flash("交接文档已生成并复制到剪贴板，贴给大象即可");
       await loadDetail(true);
     } catch (e) {
@@ -588,12 +610,67 @@
   async function copyHandoff() {
     if (!detail || !round) return;
     try {
-      await api.copyHandoff(detail.page_id, round.n);
+      await api.copyHandoff(detail.page_id, detail.review, round.n);
       flash("交接文档已复制到剪贴板");
     } catch (e) {
       flash(String(e), true);
     }
   }
+
+  function pickReview(n: number) {
+    reviewMenu = false;
+    if (!detail || n === detail.review) return;
+    viewReview = n === detail.current_review ? null : n;
+    issueId = null;
+    src = "all";
+    loadDetail(false).catch((e) => flash(String(e), true));
+  }
+
+  function startReview() {
+    reviewConfirm = false;
+    run("review");
+  }
+
+  // Section diffs under an issue (M5), loaded per issue and keyed, so a
+  // slow reply for an issue no longer shown is dropped.
+  let issueDiff = $state<{ key: string; data: IssueDiff | null; error: string | null } | null>(null);
+  const roundKey = $derived(detail && round ? `${detail.page_id}|${detail.review}|${round.n}` : "");
+  // The round count is part of the key: a new round gives older ones a "next".
+  const issueKey = $derived(
+    detail && round && cur ? `${roundKey}|${cur.id}|${detail.current_review}|${detail.rounds.length}` : "",
+  );
+  const hasNext = $derived(!!detail && !!round && (round !== detail.rounds.at(-1) || !viewingCurrent));
+
+  async function loadIssueDiff(key: string, pageId: string, review: number, n: number, section: string) {
+    issueDiff = { key, data: null, error: null };
+    try {
+      const data = await api.issueDiff(pageId, review, n, section);
+      if (issueKey === key) issueDiff = { key, data, error: null };
+    } catch (e) {
+      if (issueKey === key) issueDiff = { key, data: null, error: String(e) };
+    }
+  }
+
+  $effect(() => {
+    const key = issueKey;
+    if (key && hasNext && detail && round && cur && untrack(() => issueDiff?.key) !== key)
+      loadIssueDiff(key, detail.page_id, detail.review, round.n, cur.section);
+  });
+
+  const roundLabel = (r: RoundRef) =>
+    detail && r.review !== detail.review ? `第 ${r.review} 次审稿第 ${r.round} 轮` : `第 ${r.round} 轮`;
+  const changeCount = (a: number, r: number) => [a && `+${a}`, r && `−${r}`].filter(Boolean).join(" ") || "±0";
+
+  function closeReviewMenu(e: MouseEvent) {
+    if (reviewMenu && !(e.target as Element | null)?.closest(".review-pick")) reviewMenu = false;
+  }
+
+  // With many rounds the tab row scrolls; keep the selected one in view.
+  $effect(() => {
+    void roundIdx;
+    void detail;
+    tick().then(() => document.querySelector(".tab.on")?.scrollIntoView({ block: "nearest", inline: "nearest" }));
+  });
 
   onMount(() => {
     const unlisten = onProgress((p) => {
@@ -635,6 +712,18 @@
     {#if status === "running" && runningHint}<div class="step-error muted">{runningHint}</div>{/if}
     {#if st?.error}<div class="step-error mono">{st.error}</div>{/if}
   </div>
+{/snippet}
+
+<svelte:window onclick={closeReviewMenu} onkeydown={(e) => e.key === "Escape" && (reviewMenu = false)} />
+
+{#snippet diffLines(lines: DiffLine[])}
+  {#each lines as l, i (i)}
+    {#if l.kind === "gap"}
+      <div class="dl gap">⋯ {l.count} 行没变</div>
+    {:else}
+      <div class="dl {l.kind}"><span class="dl-mark" aria-hidden="true">{l.kind === "add" ? "+" : l.kind === "del" ? "−" : ""}</span><span class="dl-text">{l.text}</span></div>
+    {/if}
+  {/each}
 {/snippet}
 
 {#snippet dots()}
@@ -778,6 +867,30 @@
     </div>
   {/if}
 
+  {#if reviewConfirm && detail}
+    {@const last = detail.reviews.at(-1)}
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+    <div class="backdrop" onclick={(e) => e.target === e.currentTarget && (reviewConfirm = false)}
+      onkeydown={(e) => e.key === "Escape" && (reviewConfirm = false)}>
+      <div class="dialog confirm" role="dialog" aria-modal="true" aria-labelledby="review-title">
+        <div class="dialog-head">
+          <h2 id="review-title">重新审一遍「{parseTitle(detail.title).name}」？</h2>
+          <button type="button" class="icon-btn" onclick={() => (reviewConfirm = false)} aria-label="关闭">✕</button>
+        </div>
+        <ul class="confirm-list">
+          <li>从 Notion 拉最新版本，开始<b>第 {detail.current_review + 1} 次审稿的第 1 轮</b>。</li>
+          <li>之前驳回过的问题<b>不再带入</b>，金鱼和整理员都当第一次看。</li>
+          <li>第 {detail.current_review} 次审稿的 {last?.rounds ?? 0} 轮原样保留，随时可以切回去看。</li>
+          <li>新的第 1 轮会跟第 {detail.current_review} 次审稿的最后一轮比 diff，看得出定稿后改了什么。</li>
+        </ul>
+        <div class="dialog-foot">
+          <button type="button" class="secondary" onclick={() => (reviewConfirm = false)}>取消</button>
+          <button type="button" class="secondary strong" disabled={!!running || blocked} onclick={startReview}>开始第 {detail.current_review + 1} 次审稿</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if message}
     <div class="toast" class:error={message.error} role="status">{message.text}</div>
   {/if}
@@ -817,7 +930,7 @@
                     {#if p.status === "go"}
                       <span class="pill go">GO</span>
                     {:else if p.rounds}
-                      <span class="pill review">第 {p.rounds} 轮</span>
+                      <span class="pill review">{p.reviews > 1 ? `第 ${p.reviews} 次 · ` : ""}第 {p.rounds} 轮</span>
                     {/if}
                   </button>
                 {:else}
@@ -846,7 +959,7 @@
         </section>
       {:else if running === selectedId}
         <section class="running">
-          <div class="muted small-text">第 {liveRound} 轮</div>
+          <div class="muted small-text">{liveLabel}</div>
           <h1 class="running-title">{selectedItem?.title}</h1>
           <div class="live">
             <div class="live-head">
@@ -954,7 +1067,14 @@
             <div class="muted small-text">审稿中的 PRD</div>
             <h1>{detail.title}</h1>
           </div>
-          {#if !readyForNext}
+          {#if isGo}
+            <div class="go-line">
+              <span class="go-text">第 {detail.rounds.at(-1)?.n} 轮已 GO</span>
+              <span class="faint" aria-hidden="true">·</span>
+              <button type="button" class="link-btn" title="从第 1 轮重新审，之前的驳回不再带入"
+                disabled={!!running || blocked} onclick={() => (reviewConfirm = true)}>重新审一遍</button>
+            </div>
+          {:else if viewingCurrent && !readyForNext}
             <div class="start">
               <button type="button" class="secondary" title="先从 Notion 拉取最新版本，再开始审稿"
                 disabled={!!running || blocked} onclick={() => run("start")}>
@@ -965,16 +1085,37 @@
           {/if}
         </div>
 
-        <div class="tabs" role="tablist" aria-label="轮次">
-          {#each detail.rounds as r, i (r.n)}
-            <button type="button" role="tab" aria-selected={i === roundIdx} class="tab" class:on={i === roundIdx}
-              onclick={() => { roundIdx = i; issueId = null; src = "all"; }}>
-              <span class="tab-top">第 {r.n} 轮
-                {#if r.verdicts}<span class="verdict" style={verdictStyle(r.verdicts.prd)}>{r.verdicts.prd}</span>{/if}
-              </span>
-              <span class="muted small-text">{roundSummary(r)}</span>
-            </button>
-          {/each}
+        <div class="tabs-row">
+          {#if detail.reviews.length > 1}
+            <div class="review-pick">
+              <button type="button" class="review-btn" aria-haspopup="menu" aria-expanded={reviewMenu}
+                onclick={() => (reviewMenu = !reviewMenu)}>
+                第 {detail.review} 次审稿<span class="muted" aria-hidden="true">▾</span>
+              </button>
+              {#if reviewMenu}
+                <div class="review-menu" role="menu">
+                  {#each [...detail.reviews].reverse() as rv (rv.n)}
+                    <button type="button" role="menuitem" class="review-item" class:on={rv.n === detail.review} onclick={() => pickReview(rv.n)}>
+                      <span class="review-name">第 {rv.n} 次审稿</span>
+                      <span class="muted small-text">{rv.rounds} 轮{rv.n === detail.current_review && rv.verdict !== "GO" ? " · 进行中" : ""}</span>
+                      {#if rv.verdict === "GO"}<span class="pill go">GO</span>{/if}
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/if}
+          <div class="tabs" role="tablist" aria-label="轮次">
+            {#each detail.rounds as r, i (r.n)}
+              <button type="button" role="tab" aria-selected={i === roundIdx} class="tab" class:on={i === roundIdx}
+                onclick={() => { roundIdx = i; issueId = null; src = "all"; }}>
+                <span class="tab-top">第 {r.n} 轮
+                  {#if r.verdicts}<span class="verdict" style={verdictStyle(r.verdicts.prd)}>{r.verdicts.prd}</span>{/if}
+                </span>
+                <span class="muted small-text ellipsis tab-sub">{roundSummary(r)}</span>
+              </button>
+            {/each}
+          </div>
         </div>
 
         {#if readyForNext}
@@ -1108,6 +1249,33 @@
                         <div class="ref"><span class="ref-who">{FISH_NAMES[who] ?? who}金鱼</span><p>{resolveRef(round.fish, ref) ?? "（找不到原文）"}</p></div>
                       {/each}
                     </details>
+                  {/if}
+                  {#if cur.section.trim()}
+                    {#if !hasNext}
+                      <div class="sec-wait">这一节改了什么，跑完第 {round.n + 1} 轮后显示在这里。</div>
+                    {:else if issueDiff?.key === issueKey && issueDiff.data}
+                      {@const idf = issueDiff.data}
+                      {@const there = roundLabel(idf.next)}
+                      <div class="sec-diffs">
+                        {#each idf.sections as sd (sd.reference)}
+                          {#if sd.status === "changed"}
+                            <div class="sec-diff">
+                              <div class="sec-diff-head">
+                                <span class="strong">这一节在{there}的改动</span>
+                                <span class="muted small-text">{sd.reference} · {changeCount(sd.added, sd.removed)}</span>
+                              </div>
+                              <div class="sec-diff-body">{@render diffLines(sd.lines)}</div>
+                            </div>
+                          {:else}
+                            <p class="sec-note muted small-text">
+                              {sd.reference}：{sd.status === "unchanged" ? `${there}没有改动` : sd.status === "ambiguous" ? `${there}里有不止一个这样的标题，分不出是哪一节` : `${there}里找不到这个标题`}
+                            </p>
+                          {/if}
+                        {/each}
+                      </div>
+                    {:else if issueDiff?.key === issueKey && issueDiff.error}
+                      <p class="sec-note bad-text small-text">读不到下一轮的快照：{issueDiff.error}</p>
+                    {/if}
                   {/if}
                 </div>
 
@@ -1369,10 +1537,39 @@
   .resume { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
   .log { width: 100%; box-sizing: border-box; max-height: 40vh; overflow-y: auto; text-align: left; margin: 0; padding: 12px 12px 12px 32px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 8px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.8; }
 
-  .tabs { flex: none; display: flex; padding: 0 22px 14px; overflow-x: auto; }
-  .tab { flex: 1 1 0; min-width: 150px; min-height: 58px; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 8px 14px; text-align: left; background: #f9f8f4; border: 1px solid rgba(0,0,0,.1); margin-right: -1px; color: #1f2328; cursor: pointer; }
+  .tabs-row { flex: none; display: flex; align-items: center; gap: 14px; padding: 0 22px 14px; }
+  /* Scrolls sideways only when rounds do not fit, with no visible bar. */
+  .tabs { flex: 1; min-width: 0; display: flex; overflow-x: auto; padding-right: 1px; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .review-pick { flex: none; position: relative; }
+  .review-btn { display: inline-flex; align-items: center; gap: 4px; padding: 4px 0; background: none; border: none; color: #1f2328; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; }
+  .review-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 15; width: 260px; padding: 6px; background: #fff; border: 1px solid rgba(0,0,0,.12); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.12); }
+  .review-item { width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: none; border: none; border-radius: 6px; color: #1f2328; cursor: pointer; font: inherit; text-align: left; }
+  .review-item:hover { background: #f7f6f2; }
+  .review-item.on { background: #f1f0ea; }
+  .review-name { flex: 1; font-weight: 500; }
+  .go-line { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .go-text { color: #1f7a4d; }
+  .faint { color: #8a8f96; }
+  .dl { display: flex; gap: 8px; min-height: 1.7em; padding: 0 12px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; color: #3a4049; }
+  .dl-mark { flex: none; width: 10px; }
+  .dl.add { background: #e6f2eb; color: #1d5e3c; }
+  .dl.del { background: #fbe9e7; color: #8f2a21; }
+  .dl.del .dl-text { text-decoration: line-through; text-decoration-color: rgba(143,42,33,.35); }
+  .dl.gap { display: block; padding: 2px 12px; background: #faf9f6; color: #8a8f96; font-family: inherit; font-size: 11px; }
+  .sec-wait { margin-top: 16px; padding: 10px 12px; border: 1px dashed rgba(0,0,0,.15); border-radius: 8px; font-size: 12px; color: #5f6670; }
+  .sec-diffs { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .sec-diff { border: 1px solid rgba(0,0,0,.08); border-radius: 8px; overflow: hidden; }
+  .sec-diff-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 7px 10px; background: #fbfaf7; border-bottom: 1px solid rgba(0,0,0,.08); font-size: 12px; }
+  .sec-diff-body { padding: 4px 0; }
+  .sec-diff-body .dl { font-size: 11px; padding: 0 10px; }
+  .sec-note { margin: 0; line-height: 1.6; }
+  .confirm-list { margin: 0; padding: 4px 20px 8px 38px; line-height: 1.8; color: #2b3240; }
+  .tab { flex: 0 0 200px; min-height: 58px; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 8px 14px; text-align: left; background: #f9f8f4; border: 1px solid rgba(0,0,0,.1); margin-right: -1px; color: #1f2328; cursor: pointer; }
   .tab.on { background: #fff; border-color: #1f2328; position: relative; z-index: 1; }
-  .tab-top { display: flex; justify-content: space-between; width: 100%; font-weight: 600; }
+  .tab-sub { max-width: 100%; }
+  .tab-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; font-weight: 600; white-space: nowrap; }
+  .tab-top .verdict { flex: none; white-space: nowrap; }
   .verdict { font-size: 11px; font-weight: 600; border-radius: 4px; padding: 2px 8px; }
   .notice { margin: 0 22px; max-width: 560px; padding: 16px 20px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; line-height: 1.7; }
   .notice > p { margin: 2px 0 0; }

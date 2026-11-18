@@ -87,7 +87,7 @@ async fn run() -> Result<()> {
             let page = page_arg()?;
             let settings = Settings::load()?;
             let notion = Notion::from_keychain()?;
-            let pulled = store::pull(&notion, &settings, &page).await?;
+            let pulled = store::pull(&notion, &settings, &page, false).await?;
             println!("round {} -> {}", pulled.round, pulled.dir.display());
             for w in &pulled.warnings {
                 println!("warning: {w}");
@@ -100,7 +100,7 @@ async fn run() -> Result<()> {
             let page = page_arg()?;
             let settings = Settings::load()?;
             let notion = Notion::from_keychain()?;
-            let pulled = store::pull(&notion, &settings, &page).await?;
+            let pulled = store::pull(&notion, &settings, &page, false).await?;
             println!("pulled round {} -> {}", pulled.round, pulled.dir.display());
             for w in &pulled.warnings {
                 println!("warning: {w}");

@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{Advice, Decision, Issue, Role, Severity, Triage, Verdict};
-use crate::store::{latest_round, read_meta, read_state, write_atomic, write_json, write_state, PrdMeta, PrdStatus, Stage};
+use crate::store::{is_latest, prd_dir_of, read_meta, read_state, write_atomic, write_json, write_state, PrdMeta, PrdStatus, Stage};
 use crate::Result;
 
 /// Retell needs at least this share of the key-decision list (PRD §6.6).
@@ -81,8 +81,9 @@ pub fn read_decisions(round_dir: &Path) -> Result<Vec<Decision>> {
     }
 }
 
-/// Recomputes and stores the round's verdicts; when it is the PRD's latest
-/// round, also updates prd.json `status` (history never changes it).
+/// Recomputes and stores the round's verdicts; when it is the latest round
+/// of the PRD's current review, also updates prd.json `status` (history
+/// never changes it).
 pub fn refresh_verdicts(round_dir: &Path) -> Result<RoundVerdicts> {
     let triage = read_triage(round_dir)?;
     let decisions = read_decisions(round_dir)?;
@@ -91,12 +92,12 @@ pub fn refresh_verdicts(round_dir: &Path) -> Result<RoundVerdicts> {
     state.verdicts = Some(verdicts);
     write_state(round_dir, &state)?;
 
-    let prd_dir = round_dir.parent().ok_or("round dir has no parent")?;
-    if latest_round(prd_dir).as_deref() == Some(round_dir)
-        && let Some(mut meta) = read_meta(prd_dir)
+    if is_latest(round_dir)
+        && let Some(prd_dir) = prd_dir_of(round_dir)
+        && let Some(mut meta) = read_meta(&prd_dir)
     {
         meta.status = if verdicts.prd == Verdict::Go { PrdStatus::Go } else { PrdStatus::InReview };
-        write_meta(prd_dir, &meta)?;
+        write_meta(&prd_dir, &meta)?;
     }
     Ok(verdicts)
 }
@@ -106,8 +107,7 @@ fn write_meta(prd_dir: &Path, meta: &PrdMeta) -> Result<()> {
 }
 
 fn ensure_latest(round_dir: &Path) -> Result<()> {
-    let prd_dir = round_dir.parent().ok_or("round dir has no parent")?;
-    if latest_round(prd_dir).as_deref() != Some(round_dir) {
+    if !is_latest(round_dir) {
         return Err("only the latest round can be decided; earlier rounds are read-only".into());
     }
     Ok(())
@@ -227,7 +227,7 @@ pub fn write_handoff(round_dir: &Path) -> Result<String> {
 }
 
 fn prd_title(round_dir: &Path) -> String {
-    round_dir.parent().and_then(read_meta).map(|m| m.title).unwrap_or_default()
+    prd_dir_of(round_dir).and_then(|p| read_meta(&p)).map(|m| m.title).unwrap_or_default()
 }
 
 /// True when handoff.md exists but no longer matches what the current

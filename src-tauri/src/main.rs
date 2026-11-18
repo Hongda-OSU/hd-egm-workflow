@@ -7,7 +7,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use egm_core::model::{Advice, Decision, Triage};
+use egm_core::diff;
+use egm_core::model::{Advice, Decision, Triage, Verdict};
 use egm_core::notion::{compact_id, Block, Notion};
 use egm_core::prd;
 use egm_core::review::{self, RoundVerdicts};
@@ -83,7 +84,9 @@ struct PrdItem {
     page_id: String,
     title: String,
     status: PrdStatus,
+    /// Rounds in the current review.
     rounds: u32,
+    reviews: u32,
 }
 
 #[derive(Serialize)]
@@ -116,15 +119,22 @@ async fn list_prds() -> CmdResult<PrdList> {
     match listed {
         Ok(entries) => {
             for e in entries {
-                let (status, rounds) = e.meta.map_or((PrdStatus::NotReviewed, 0), |m| (m.status, m.rounds));
-                items.push(PrdItem { page_id: e.page_id, title: e.title, status, rounds });
+                let (status, rounds, reviews) =
+                    e.meta.map_or((PrdStatus::NotReviewed, 0, 1), |m| (m.status, m.rounds, m.reviews));
+                items.push(PrdItem { page_id: e.page_id, title: e.title, status, rounds, reviews });
             }
         }
         Err(e) => error = Some(e.to_string()),
     }
     for m in locals {
         if !items.iter().any(|i| compact_id(&i.page_id) == compact_id(&m.notion_page_id)) {
-            items.push(PrdItem { page_id: m.notion_page_id, title: m.title, status: m.status, rounds: m.rounds });
+            items.push(PrdItem {
+                page_id: m.notion_page_id,
+                title: m.title,
+                status: m.status,
+                rounds: m.rounds,
+                reviews: m.reviews,
+            });
         }
     }
     items.sort_by_key(|i| i.rounds == 0);
@@ -173,11 +183,24 @@ struct RoundView {
     fish: BTreeMap<String, Value>,
 }
 
+/// One review of a PRD, for the review switcher.
+#[derive(Serialize)]
+struct ReviewSummary {
+    n: u32,
+    rounds: u32,
+    /// The PRD verdict of the review's last round.
+    verdict: Option<Verdict>,
+}
+
 #[derive(Serialize)]
 struct PrdDetail {
     page_id: String,
     title: String,
     status: PrdStatus,
+    /// The review `rounds` belong to, and the current (newest) review.
+    review: u32,
+    current_review: u32,
+    reviews: Vec<ReviewSummary>,
     rounds: Vec<RoundView>,
 }
 
@@ -185,19 +208,44 @@ fn prd_dir(settings: &Settings, page_id: &str) -> CmdResult<PathBuf> {
     store::find_prd_dir(&settings.data_dir(), page_id).ok_or_else(|| "this PRD has no local rounds yet".into())
 }
 
-fn round_dir(page_id: &str, round: u32) -> CmdResult<PathBuf> {
-    let dir = prd_dir(&settings()?, page_id)?.join(format!("round-{round}"));
-    if dir.is_dir() { Ok(dir) } else { Err(format!("round {round} not found")) }
+fn round_dir(page_id: &str, review: u32, round: u32) -> CmdResult<PathBuf> {
+    let dir = store::review_dir(&prd_dir(&settings()?, page_id)?, review).join(format!("round-{round}"));
+    if dir.is_dir() { Ok(dir) } else { Err(format!("round {round} of review {review} not found")) }
 }
 
-/// Everything stored locally for one PRD; `None` when it was never run.
+fn round_verdicts(state: &store::RoundState, triage: Option<&Triage>, decisions: &[Decision]) -> Option<RoundVerdicts> {
+    // Verdicts are only stored once a decision is made, so a round decided
+    // before that, or not decided yet, has none on disk. Show what the
+    // current decisions give instead of nothing; nothing is written here.
+    state.verdicts.or_else(|| triage.map(|t| review::compute_verdicts(t, decisions, &state.warnings)))
+}
+
+fn review_summaries(prd: &Path, count: u32) -> Vec<ReviewSummary> {
+    (1..=count)
+        .map(|n| {
+            let dirs = store::rounds(&store::review_dir(prd, n));
+            let verdict = dirs.last().and_then(|(_, rd)| {
+                let state = store::read_state(rd).ok()?;
+                let triage = review::read_triage(rd).ok();
+                let decisions = review::read_decisions(rd).unwrap_or_default();
+                round_verdicts(&state, triage.as_ref(), &decisions).map(|v| v.prd)
+            });
+            ReviewSummary { n, rounds: dirs.len() as u32, verdict }
+        })
+        .collect()
+}
+
+/// Everything stored locally for one review of a PRD (the current review
+/// when `review` is None); `None` when the PRD was never run.
 #[tauri::command]
-async fn get_prd(page_id: String) -> CmdResult<Option<PrdDetail>> {
+async fn get_prd(page_id: String, review: Option<u32>) -> CmdResult<Option<PrdDetail>> {
     let settings = settings()?;
     let Some(dir) = store::find_prd_dir(&settings.data_dir(), &page_id) else { return Ok(None) };
     let meta = store::read_meta(&dir).ok_or("prd.json is missing")?;
-    let dirs = store::rounds(&dir);
-    let last = dirs.last().map(|(n, _)| *n);
+    let review = review.unwrap_or(meta.reviews).clamp(1, meta.reviews);
+    let dirs = store::rounds(&store::review_dir(&dir, review));
+    // Only the current review's last round can be decided.
+    let last = dirs.last().map(|(n, _)| *n).filter(|_| review == meta.reviews);
     let mut rounds = Vec::new();
     for (n, rd) in dirs {
         let Ok(state) = store::read_state(&rd) else { continue };
@@ -210,12 +258,7 @@ async fn get_prd(page_id: String) -> CmdResult<Option<PrdDetail>> {
             .collect();
         let triage = review::read_triage(&rd).ok();
         let decisions = review::read_decisions(&rd).unwrap_or_default();
-        // Verdicts are only stored once a decision is made, so a round decided
-        // before that, or not decided yet, has none on disk. Show what the
-        // current decisions give instead of nothing; nothing is written here.
-        let verdicts = state.verdicts.or_else(|| {
-            triage.as_ref().map(|t| review::compute_verdicts(t, &decisions, &state.warnings))
-        });
+        let verdicts = round_verdicts(&state, triage.as_ref(), &decisions);
         rounds.push(RoundView {
             n,
             latest: Some(n) == last,
@@ -231,7 +274,59 @@ async fn get_prd(page_id: String) -> CmdResult<Option<PrdDetail>> {
             fish,
         });
     }
-    Ok(Some(PrdDetail { page_id: meta.notion_page_id, title: meta.title, status: meta.status, rounds }))
+    Ok(Some(PrdDetail {
+        reviews: review_summaries(&dir, meta.reviews),
+        page_id: meta.notion_page_id,
+        title: meta.title,
+        status: meta.status,
+        review,
+        current_review: meta.reviews,
+        rounds,
+    }))
+}
+
+#[derive(Serialize)]
+struct RoundRef {
+    review: u32,
+    round: u32,
+}
+
+/// The text a snapshot diff compares: prd.md plus the key-decision list,
+/// which goldfish never see but the author does change.
+fn snapshot_text(rd: &Path) -> CmdResult<String> {
+    let prd = fs::read_to_string(rd.join("prd.md")).map_err(err)?;
+    let key = fs::read_to_string(rd.join("key-decisions.md")).unwrap_or_default();
+    Ok(format!("{}\n\n{key}", prd.trim_end()))
+}
+
+/// The round after (review, round): the next round of the same review, or
+/// round 1 of the next review.
+fn next_round(prd: &Path, reviews: u32, review: u32, round: u32) -> Option<(RoundRef, PathBuf)> {
+    let rd = store::review_dir(prd, review).join(format!("round-{}", round + 1));
+    if rd.is_dir() {
+        return Some((RoundRef { review, round: round + 1 }, rd));
+    }
+    let rd = store::review_dir(prd, review + 1).join("round-1");
+    (review < reviews && rd.is_dir()).then_some((RoundRef { review: review + 1, round: 1 }, rd))
+}
+
+#[derive(Serialize)]
+struct IssueDiff {
+    next: RoundRef,
+    sections: Vec<diff::SectionDiff>,
+}
+
+/// How the sections an issue names changed in the round after it (PRD
+/// §6.4); `None` while there is no next round yet.
+#[tauri::command]
+async fn issue_diff(page_id: String, review: u32, round: u32, section: String) -> CmdResult<Option<IssueDiff>> {
+    let settings = settings()?;
+    let prd = prd_dir(&settings, &page_id)?;
+    let reviews = store::read_meta(&prd).map_or(1, |m| m.reviews);
+    let rd = round_dir(&page_id, review, round)?;
+    let Some((next, next_dir)) = next_round(&prd, reviews, review, round) else { return Ok(None) };
+    let sections = diff::issue_sections(&section, &snapshot_text(&rd)?, &snapshot_text(&next_dir)?);
+    Ok(Some(IssueDiff { next, sections }))
 }
 
 #[derive(Clone, Serialize)]
@@ -245,8 +340,8 @@ fn progress(app: &AppHandle, page_id: &str, line: String) {
 }
 
 async fn run_round(app: &AppHandle, settings: &Settings, page_id: &str, dir: &Path) -> CmdResult<()> {
-    let prd_dir = dir.parent().ok_or("round dir has no parent")?;
-    let _lock = Lock::acquire(prd_dir).map_err(err)?;
+    let prd_dir = store::prd_dir_of(dir).ok_or("round dir has no parent")?;
+    let _lock = Lock::acquire(&prd_dir).map_err(err)?;
     let (app2, pid) = (app.clone(), page_id.to_string());
     egm_core::round::run(settings, dir, move |line| progress(&app2, &pid, line))
         .await
@@ -257,10 +352,22 @@ async fn run_round(app: &AppHandle, settings: &Settings, page_id: &str, dir: &Pa
 /// Pull a new snapshot and run 4 goldfish + the triager (PRD §6.3).
 #[tauri::command]
 async fn start_round(app: AppHandle, page_id: String) -> CmdResult<()> {
+    pull_and_run(&app, &page_id, false).await
+}
+
+/// Like start_round, but as round 1 of a new review: earlier rejections no
+/// longer carry over, and earlier reviews stay as they are.
+#[tauri::command]
+async fn start_review(app: AppHandle, page_id: String) -> CmdResult<()> {
+    pull_and_run(&app, &page_id, true).await
+}
+
+async fn pull_and_run(app: &AppHandle, page_id: &str, new_review: bool) -> CmdResult<()> {
+    let (app, page_id) = (app.clone(), page_id.to_string());
     let settings = settings()?;
     let notion = Notion::from_keychain().map_err(err)?;
     progress(&app, &page_id, "pull: fetching PRD and rule pages from Notion".into());
-    let pulled = store::pull(&notion, &settings, &page_id).await.map_err(err)?;
+    let pulled = store::pull(&notion, &settings, &page_id, new_review).await.map_err(err)?;
     for w in &pulled.warnings {
         progress(&app, &page_id, format!("warning: {w}"));
     }
@@ -271,18 +378,25 @@ async fn start_round(app: AppHandle, page_id: String) -> CmdResult<()> {
 #[tauri::command]
 async fn resume_round(app: AppHandle, page_id: String) -> CmdResult<()> {
     let settings = settings()?;
-    let dir = store::latest_round(&prd_dir(&settings, &page_id)?).ok_or("no rounds yet")?;
+    let dir = store::latest_round(&store::current_review_dir(&prd_dir(&settings, &page_id)?)).ok_or("no rounds yet")?;
     run_round(&app, &settings, &page_id, &dir).await
 }
 
 #[tauri::command]
-async fn decide(page_id: String, round: u32, issue_id: String, decision: String, note: Option<String>) -> CmdResult<RoundVerdicts> {
+async fn decide(
+    page_id: String,
+    review: u32,
+    round: u32,
+    issue_id: String,
+    decision: String,
+    note: Option<String>,
+) -> CmdResult<RoundVerdicts> {
     let advice = match decision.as_str() {
         "accept" => Advice::Accept,
         "reject" => Advice::Reject,
         other => return Err(format!("unknown decision {other}")),
     };
-    review::decide(&round_dir(&page_id, round)?, &issue_id, advice, note).map_err(err)
+    review::decide(&round_dir(&page_id, review, round)?, &issue_id, advice, note).map_err(err)
 }
 
 fn pbcopy(text: &str) -> CmdResult<()> {
@@ -294,16 +408,16 @@ fn pbcopy(text: &str) -> CmdResult<()> {
 
 /// Writes handoff.md and puts it on the clipboard for pasting to the elephant.
 #[tauri::command]
-async fn make_handoff(page_id: String, round: u32) -> CmdResult<String> {
-    let md = review::write_handoff(&round_dir(&page_id, round)?).map_err(err)?;
+async fn make_handoff(page_id: String, review: u32, round: u32) -> CmdResult<String> {
+    let md = review::write_handoff(&round_dir(&page_id, review, round)?).map_err(err)?;
     pbcopy(&md)?;
     Ok(md)
 }
 
 /// Copies the saved handoff.md again without regenerating it.
 #[tauri::command]
-async fn copy_handoff(page_id: String, round: u32) -> CmdResult<()> {
-    let md = fs::read_to_string(round_dir(&page_id, round)?.join("handoff.md")).map_err(err)?;
+async fn copy_handoff(page_id: String, review: u32, round: u32) -> CmdResult<()> {
+    let md = fs::read_to_string(round_dir(&page_id, review, round)?.join("handoff.md")).map_err(err)?;
     pbcopy(&md)
 }
 
@@ -390,7 +504,9 @@ fn main() {
             rule_pages,
             get_prd,
             start_round,
+            start_review,
             resume_round,
+            issue_diff,
             decide,
             make_handoff,
             copy_handoff,

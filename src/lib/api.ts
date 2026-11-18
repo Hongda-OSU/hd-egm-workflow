@@ -70,10 +70,20 @@ export interface RoundView {
   fish: Record<string, any>;
 }
 
+export interface ReviewSummary {
+  n: number;
+  rounds: number;
+  verdict: Verdict | null;
+}
+
 export interface PrdDetail {
   page_id: string;
   title: string;
   status: string;
+  /** The review `rounds` belong to, and the newest one. */
+  review: number;
+  current_review: number;
+  reviews: ReviewSummary[];
   rounds: RoundView[];
 }
 
@@ -81,7 +91,31 @@ export interface PrdItem {
   page_id: string;
   title: string;
   status: "none" | "in_review" | "go";
+  /** Rounds in the current review. */
   rounds: number;
+  reviews: number;
+}
+
+export type DiffLine =
+  | { kind: "same" | "add" | "del"; text: string }
+  | { kind: "gap"; count: number };
+
+export interface RoundRef {
+  review: number;
+  round: number;
+}
+
+export interface SectionDiff {
+  reference: string;
+  status: "changed" | "unchanged" | "not_found" | "ambiguous";
+  added: number;
+  removed: number;
+  lines: DiffLine[];
+}
+
+export interface IssueDiff {
+  next: RoundRef;
+  sections: SectionDiff[];
 }
 
 export interface PrdList {
@@ -132,13 +166,16 @@ export const api = {
   appStatus: () => invoke<AppStatus>("app_status"),
   listPrds: () => invoke<PrdList>("list_prds"),
   rulePages: () => invoke<RuleItem[]>("rule_pages"),
-  getPrd: (pageId: string) => invoke<PrdDetail | null>("get_prd", { pageId }),
+  getPrd: (pageId: string, review: number | null) => invoke<PrdDetail | null>("get_prd", { pageId, review }),
   startRound: (pageId: string) => invoke<void>("start_round", { pageId }),
+  startReview: (pageId: string) => invoke<void>("start_review", { pageId }),
   resumeRound: (pageId: string) => invoke<void>("resume_round", { pageId }),
-  decide: (pageId: string, round: number, issueId: string, decision: Advice, note: string | null) =>
-    invoke<RoundVerdicts>("decide", { pageId, round, issueId, decision, note }),
-  makeHandoff: (pageId: string, round: number) => invoke<string>("make_handoff", { pageId, round }),
-  copyHandoff: (pageId: string, round: number) => invoke<void>("copy_handoff", { pageId, round }),
+  decide: (pageId: string, review: number, round: number, issueId: string, decision: Advice, note: string | null) =>
+    invoke<RoundVerdicts>("decide", { pageId, review, round, issueId, decision, note }),
+  makeHandoff: (pageId: string, review: number, round: number) => invoke<string>("make_handoff", { pageId, review, round }),
+  copyHandoff: (pageId: string, review: number, round: number) => invoke<void>("copy_handoff", { pageId, review, round }),
+  issueDiff: (pageId: string, review: number, round: number, section: string) =>
+    invoke<IssueDiff | null>("issue_diff", { pageId, review, round, section }),
   copyText: (text: string) => invoke<void>("copy_text", { text }),
   openNotion: (pageId: string) => invoke<void>("open_notion", { pageId }),
   getSettings: () => invoke<SettingsView>("get_settings"),

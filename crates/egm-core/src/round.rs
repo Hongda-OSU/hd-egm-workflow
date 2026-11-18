@@ -166,15 +166,16 @@ async fn run_fish(
     }
 }
 
-/// Rejected issues of all earlier rounds (PRD §6.6), from each round's
+/// Rejected issues of all earlier rounds of the same review (PRD §6.6;
+/// `review_dir` holds that review's `round-N` dirs), from each round's
 /// triage.json + decisions.json. A rejection drops out again when a later
 /// round matched an issue to it (`rejected_as`) and the author accepted that
 /// issue: the author changed their mind.
-pub fn collect_rejections(prd_dir: &Path, current: u32) -> Result<Vec<Rejection>> {
+pub fn collect_rejections(review_dir: &Path, current: u32) -> Result<Vec<Rejection>> {
     let mut out = Vec::new();
     let mut overturned = Vec::new();
     for k in 1..current {
-        let dir = prd_dir.join(format!("round-{k}"));
+        let dir = review_dir.join(format!("round-{k}"));
         // A round that was never triaged or decided has nothing to carry
         // over; a file that exists but cannot be read stops the run.
         let (Some(t), Some(d)) = (read_optional(&dir.join("triage.json"))?, read_optional(&dir.join("decisions.json"))?) else {
@@ -320,7 +321,8 @@ fn round_number(round_dir: &Path) -> Result<u32> {
 /// Runs whatever is not done yet in `round_dir`. `log` gets progress lines.
 pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(String)) -> Result<RoundResult> {
     let round = round_number(round_dir)?;
-    let prd_dir = round_dir.parent().ok_or("round dir has no parent")?;
+    // A round's parent is its review's dir; rejections come from there.
+    let review_dir = round_dir.parent().ok_or("round dir has no parent")?;
     let rules = round_dir.join("rules");
     let prd = read(&round_dir.join("prd.md"))?;
     let key_decisions = read(&round_dir.join("key-decisions.md"))?;
@@ -397,7 +399,7 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
     // Triage stage.
     let triage_path = round_dir.join("triage.json");
     if state.triage.status != StepStatus::Done {
-        let rejections = collect_rejections(prd_dir, round)?;
+        let rejections = collect_rejections(review_dir, round)?;
         if let Err(e) = write_json(&round_dir.join("rejected-history.json"), &rejections) {
             return Err(fail_triage(round_dir, &mut state, format!("cannot save rejected-history.json: {e}")));
         }
