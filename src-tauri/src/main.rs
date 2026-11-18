@@ -152,6 +152,8 @@ struct RoundView {
     decisions: Vec<Decision>,
     verdicts: Option<RoundVerdicts>,
     has_handoff: bool,
+    /// A decision or note changed after handoff.md was written.
+    handoff_stale: bool,
     /// Raw goldfish output by name, for showing an issue's `refs`.
     fish: BTreeMap<String, Value>,
 }
@@ -202,6 +204,7 @@ async fn get_prd(page_id: String) -> CmdResult<Option<PrdDetail>> {
             decisions: review::read_decisions(&rd).unwrap_or_default(),
             verdicts: state.verdicts,
             has_handoff: rd.join("handoff.md").is_file(),
+            handoff_stale: review::handoff_stale(&rd),
             fish,
         });
     }
@@ -274,6 +277,13 @@ async fn make_handoff(page_id: String, round: u32) -> CmdResult<String> {
     Ok(md)
 }
 
+/// Copies the saved handoff.md again without regenerating it.
+#[tauri::command]
+async fn copy_handoff(page_id: String, round: u32) -> CmdResult<()> {
+    let md = fs::read_to_string(round_dir(&page_id, round)?.join("handoff.md")).map_err(err)?;
+    pbcopy(&md)
+}
+
 #[tauri::command]
 async fn copy_text(text: String) -> CmdResult<()> {
     pbcopy(&text)
@@ -305,6 +315,7 @@ fn main() {
             resume_round,
             decide,
             make_handoff,
+            copy_handoff,
             copy_text,
             open_notion
         ])

@@ -218,14 +218,26 @@ pub fn write_handoff(round_dir: &Path) -> Result<String> {
         let ids: Vec<&str> = open.iter().map(|i| i.id.as_str()).collect();
         return Err(format!("decide these first: {}", ids.join(", ")).into());
     }
-    let prd_dir = round_dir.parent().ok_or("round dir has no parent")?;
-    let title = read_meta(prd_dir).map(|m| m.title).unwrap_or_default();
-    let md = render_handoff(&title, &triage, &decisions);
+    let md = render_handoff(&prd_title(round_dir), &triage, &decisions);
     write_atomic(&round_dir.join("handoff.md"), md.as_bytes())?;
     let mut state = read_state(round_dir)?;
     state.stage = Stage::Done;
     write_state(round_dir, &state)?;
     Ok(md)
+}
+
+fn prd_title(round_dir: &Path) -> String {
+    round_dir.parent().and_then(read_meta).map(|m| m.title).unwrap_or_default()
+}
+
+/// True when handoff.md exists but no longer matches what the current
+/// decisions would produce, i.e. a decision or note changed after it was
+/// written. Compared by content, so changing a decision and changing it
+/// back is not stale. Anything unreadable counts as not stale.
+pub fn handoff_stale(round_dir: &Path) -> bool {
+    let Ok(saved) = fs::read_to_string(round_dir.join("handoff.md")) else { return false };
+    let (Ok(triage), Ok(decisions)) = (read_triage(round_dir), read_decisions(round_dir)) else { return false };
+    render_handoff(&prd_title(round_dir), &triage, &decisions) != saved
 }
 
 /// UTC timestamp, e.g. 2026-11-15T20:30:00Z.
@@ -334,6 +346,27 @@ mod tests {
         assert!(md.contains("| r3-03 | t-r3-03 | 与历史驳回 r2-09 相同 |"));
         assert!(md.contains("| r3-04 | t-r3-04 | 设计如此 |"));
         assert!(!md.contains("| r |"), "never uses the triager's reason");
+    }
+
+    #[test]
+    fn handoff_goes_stale_only_when_its_content_would_change() {
+        let tmp = crate::testutil::TempDir::new("stale");
+        let rd = tmp.path().join("round-1");
+        fs::create_dir_all(&rd).unwrap();
+        let t = triage(vec![issue("r1-01", Role::Critic, &[], Severity::High, None)], 10, 10);
+        write_json(&rd.join("triage.json"), &t).unwrap();
+        assert!(!handoff_stale(&rd), "no handoff yet");
+
+        let accepted = vec![dec("r1-01", Advice::Accept)];
+        write_json(&rd.join("decisions.json"), &accepted).unwrap();
+        fs::write(rd.join("handoff.md"), render_handoff("", &t, &accepted)).unwrap();
+        assert!(!handoff_stale(&rd));
+
+        write_json(&rd.join("decisions.json"), &vec![dec("r1-01", Advice::Reject)]).unwrap();
+        assert!(handoff_stale(&rd));
+
+        write_json(&rd.join("decisions.json"), &accepted).unwrap();
+        assert!(!handoff_stale(&rd), "changing back matches the saved file again");
     }
 
     #[test]

@@ -64,6 +64,7 @@ export interface RoundView {
   decisions: Decision[];
   verdicts: RoundVerdicts | null;
   has_handoff: boolean;
+  handoff_stale: boolean;
   fish: Record<string, any>;
 }
 
@@ -110,6 +111,7 @@ export const api = {
   decide: (pageId: string, round: number, issueId: string, decision: Advice, note: string | null) =>
     invoke<RoundVerdicts>("decide", { pageId, round, issueId, decision, note }),
   makeHandoff: (pageId: string, round: number) => invoke<string>("make_handoff", { pageId, round }),
+  copyHandoff: (pageId: string, round: number) => invoke<void>("copy_handoff", { pageId, round }),
   copyText: (text: string) => invoke<void>("copy_text", { text }),
   openNotion: (pageId: string) => invoke<void>("open_notion", { pageId }),
 };

@@ -294,6 +294,16 @@
     }
   }
 
+  async function copyHandoff() {
+    if (!detail || !round) return;
+    try {
+      await api.copyHandoff(detail.page_id, round.n);
+      flash("交接文档已复制到剪贴板");
+    } catch (e) {
+      flash(String(e), true);
+    }
+  }
+
   onMount(() => {
     const unlisten = onProgress((p) => {
       if (p.page_id === running) progressLines = [...progressLines, p.line];
@@ -509,12 +519,21 @@
               </div>
               {#if round.latest}
                 <div class="list-foot">
-                  <span class="muted small-text">
-                    {undecided.length ? `还有 ${undecided.length} 条待决定` : round.has_handoff ? "交接文档已生成" : "都拍完了"}
-                  </span>
-                  <button type="button" class={round.has_handoff ? "secondary" : "primary"} disabled={undecided.length > 0} onclick={handoff}>
-                    {round.has_handoff ? "重新生成交接文档" : "生成交接文档"}
-                  </button>
+                  {#if undecided.length}
+                    <span class="muted foot-text">还有 <b class="pending">{undecided.length}</b> 条待决定，拍完才能生成交接文档</span>
+                  {:else if !round.has_handoff}
+                    <span class="muted foot-text">都拍完了</span>
+                    <button type="button" class="secondary" onclick={handoff}>生成交接文档</button>
+                  {:else if round.handoff_stale}
+                    <span class="foot-text stale">生成后你改过决定，交接文档已过时</span>
+                    <button type="button" class="secondary small-btn" onclick={handoff}>重新生成</button>
+                  {:else}
+                    <span class="foot-text done">
+                      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                      交接文档已生成
+                    </span>
+                    <button type="button" class="secondary small-btn" onclick={copyHandoff}>复制</button>
+                  {/if}
                 </div>
               {/if}
             </section>
@@ -777,7 +796,11 @@
   .sev { font-weight: 600; }
   .state { margin-left: auto; font-weight: 600; }
   .issue-title { font-size: 13px; line-height: 1.5; font-weight: 500; }
-  .list-foot { flex: none; display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid rgba(0,0,0,.06); }
+  .list-foot { flex: none; display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 56px; box-sizing: border-box; padding: 10px 14px; border-top: 1px solid rgba(0,0,0,.06); }
+  .foot-text { font-size: 12px; }
+  .foot-text .pending { color: #b85414; }
+  .foot-text.done { display: inline-flex; align-items: center; gap: 5px; color: #1f7a4d; font-weight: 600; }
+  .foot-text.stale { color: #b85414; }
 
   .detail h2 { margin-top: 8px; }
   .detail .issue-sections { margin: 4px 0 0; }
