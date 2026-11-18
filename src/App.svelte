@@ -91,6 +91,8 @@
   type LiveStep = { status: Step["status"]; start: number | null; end: number | null; error: string | null };
   const FISH_KEYS = ["retell", "critic", "ready", "spec"];
   let live = $state<Record<string, LiveStep>>({});
+  /** Seconds the pull waits for a just-made Notion edit to settle; null when not waiting. */
+  let pullWait = $state<number | null>(null);
   let liveLabel = $state("");
   let runStart = $state(0);
   let now = $state(Date.now());
@@ -489,7 +491,9 @@
   function onLiveLine(line: string) {
     const t = Date.now();
     if (line.startsWith("pull:")) {
-      if (live.pull) live.pull = { ...live.pull, status: "running", start: t };
+      const w = line.match(/^pull: waiting (\d+)s/);
+      if (w) pullWait = Number(w[1]);
+      else if (live.pull) live.pull = { ...live.pull, status: "running", start: t };
       return;
     }
     const m = line.match(/^(retell|critic|ready|spec|triage): (running|done|failed)(?::\s*(.*))?$/);
@@ -531,6 +535,7 @@
     if (!(await checkStatus())) return;
     running = selectedId;
     progressLines = [];
+    pullWait = null;
     runStart = now = Date.now();
     const last = viewingCurrent ? detail?.rounds.at(-1) : undefined;
     const fresh = (): LiveStep => ({ status: "queued", start: null, end: null, error: null });
@@ -968,7 +973,8 @@
             </div>
             <div class="steps">
               {#if live.pull}
-                {@render liveRow("从 Notion 拉取快照", live.pull, false, "")}
+                {@render liveRow("从 Notion 拉取快照", live.pull, false, "",
+                  pullWait ? `PRD 刚改过，等 Notion 记下这次修改，最多 ${pullWait} 秒` : "")}
               {/if}
               {#if live.triage?.status === "queued"}
                 <div class="step"><div class="step-row"><span class="step-mark"></span><span class="step-name">{FISH_KEYS.length} 条金鱼一起审稿</span></div></div>

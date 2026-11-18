@@ -242,7 +242,11 @@ pub fn handoff_stale(round_dir: &Path) -> bool {
 
 /// UTC timestamp, e.g. 2026-11-15T20:30:00Z.
 pub fn now_rfc3339() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+    rfc3339(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64)
+}
+
+/// UTC timestamp for `secs` since the Unix epoch.
+pub fn rfc3339(secs: i64) -> String {
     let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
     let t = secs.rem_euclid(86_400);
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", t / 3600, t % 3600 / 60, t % 60)

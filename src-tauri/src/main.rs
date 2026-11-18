@@ -367,7 +367,8 @@ async fn pull_and_run(app: &AppHandle, page_id: &str, new_review: bool) -> CmdRe
     let settings = settings()?;
     let notion = Notion::from_keychain().map_err(err)?;
     progress(&app, &page_id, "pull: fetching PRD and rule pages from Notion".into());
-    let pulled = store::pull(&notion, &settings, &page_id, new_review).await.map_err(err)?;
+    let on_wait = |secs: u64| progress(&app, &page_id, format!("pull: waiting {secs}s for recent Notion edits to settle"));
+    let pulled = store::pull(&notion, &settings, &page_id, new_review, &on_wait).await.map_err(err)?;
     for w in &pulled.warnings {
         progress(&app, &page_id, format!("warning: {w}"));
     }

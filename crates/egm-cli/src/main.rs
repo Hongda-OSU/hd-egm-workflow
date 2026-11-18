@@ -59,6 +59,10 @@ fn print_summary(r: &RoundResult) {
     println!("  overall: {}", if r.overall_go() { "GO" } else { "NO-GO" });
 }
 
+fn wait_note(secs: u64) {
+    println!("PRD was edited in the last minute; waiting {secs}s for Notion to settle");
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if let Err(e) = run().await {
@@ -87,7 +91,7 @@ async fn run() -> Result<()> {
             let page = page_arg()?;
             let settings = Settings::load()?;
             let notion = Notion::from_keychain()?;
-            let pulled = store::pull(&notion, &settings, &page, false).await?;
+            let pulled = store::pull(&notion, &settings, &page, false, &wait_note).await?;
             println!("round {} -> {}", pulled.round, pulled.dir.display());
             for w in &pulled.warnings {
                 println!("warning: {w}");
@@ -100,7 +104,7 @@ async fn run() -> Result<()> {
             let page = page_arg()?;
             let settings = Settings::load()?;
             let notion = Notion::from_keychain()?;
-            let pulled = store::pull(&notion, &settings, &page, false).await?;
+            let pulled = store::pull(&notion, &settings, &page, false, &wait_note).await?;
             println!("pulled round {} -> {}", pulled.round, pulled.dir.display());
             for w in &pulled.warnings {
                 println!("warning: {w}");

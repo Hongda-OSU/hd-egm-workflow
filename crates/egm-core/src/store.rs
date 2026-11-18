@@ -345,8 +345,9 @@ struct Snapshot {
 }
 
 /// Pulls the PRD and rule pages; retries when any page was edited mid-pull
-/// so a round never mixes versions (PRD §5).
-async fn snapshot(notion: &Notion, settings: &Settings, page_id: &str) -> Result<Snapshot> {
+/// so a round never mixes versions (PRD §5). `on_wait` gets the seconds it
+/// waits for a recent edit to settle (see `settle_wait`).
+async fn snapshot(notion: &Notion, settings: &Settings, page_id: &str, on_wait: &OnWait<'_>) -> Result<Snapshot> {
     let rule_ids: Vec<(String, String)> = settings
         .rule_pages
         .iter()
@@ -355,8 +356,14 @@ async fn snapshot(notion: &Notion, settings: &Settings, page_id: &str) -> Result
     let mut ids = vec![page_id.to_string()];
     ids.extend(rule_ids.iter().map(|(_, id)| id.clone()));
 
-    for _ in 0..3 {
+    for _ in 0..4 {
         let before = edited_times(notion, &ids).await?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
+        if let Some(wait) = settle_wait(&before, now) {
+            on_wait(wait.as_secs());
+            tokio::time::sleep(wait).await;
+            continue;
+        }
         let prd_blocks = notion.tree(page_id).await?;
         let mut rules = Vec::new();
         for (name, id) in &rule_ids {
@@ -370,6 +377,17 @@ async fn snapshot(notion: &Notion, settings: &Settings, page_id: &str) -> Result
     Err("Notion pages kept changing while pulling; try again in a minute".into())
 }
 
+/// Notion's `last_edited_time` is truncated to the minute, so an edit made
+/// during the pull in the same minute as the last one leaves it unchanged.
+/// When any page was edited within the last minute (a minute of slack for
+/// clock skew), returns how long to wait until that minute is safely over;
+/// after that, any new edit lands in a later minute and changes the value.
+fn settle_wait(times: &[String], now: i64) -> Option<std::time::Duration> {
+    let cutoff = crate::review::rfc3339(now - 60);
+    let recent = times.iter().any(|t| t.get(..16).is_some_and(|m| m >= &cutoff[..16]));
+    recent.then(|| std::time::Duration::from_secs((121 - now.rem_euclid(60)) as u64))
+}
+
 async fn edited_times(notion: &Notion, ids: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for id in ids {
@@ -377,6 +395,9 @@ async fn edited_times(notion: &Notion, ids: &[String]) -> Result<Vec<String>> {
     }
     Ok(out)
 }
+
+/// Called with the seconds `pull` will wait before reading Notion again.
+pub type OnWait<'a> = dyn Fn(u64) + Send + Sync + 'a;
 
 pub struct PulledRound {
     pub dir: PathBuf,
@@ -388,7 +409,13 @@ pub struct PulledRound {
 /// rules/ and round.json. Everything goes to a temp dir first and is moved
 /// into place only when complete. With `new_review`, the round is round 1
 /// of a new review; the PRD must already have rounds.
-pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str, new_review: bool) -> Result<PulledRound> {
+pub async fn pull(
+    notion: &Notion,
+    settings: &Settings,
+    page_id: &str,
+    new_review: bool,
+    on_wait: &OnWait<'_>,
+) -> Result<PulledRound> {
     let page = notion.page(page_id).await?;
     let data_dir = settings.data_dir();
     let prd_dir = find_prd_dir(&data_dir, &page.id)
@@ -409,7 +436,7 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str, new_revie
     }
     meta.title = page.title.clone();
 
-    let snap = snapshot(notion, settings, &page.id).await?;
+    let snap = snapshot(notion, settings, &page.id, on_wait).await?;
     let mut warnings = snap.prd.warnings.clone();
     warnings.extend(snap.key_decisions.warnings.iter().map(|w| format!("key-decisions: {w}")));
     for (name, r) in &snap.rules {
@@ -461,6 +488,27 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str, new_revie
 mod tests {
     use super::*;
     use crate::testutil::TempDir;
+
+    #[test]
+    fn edits_in_the_last_minute_wait_until_it_is_over() {
+        // 2026-11-18T18:02:30Z
+        let now = 1_795_024_950;
+        assert_eq!(crate::review::rfc3339(now), "2026-11-18T18:02:30Z");
+        let at = |t: &str| vec![t.to_string(), "2026-01-01T00:00:00.000Z".to_string()];
+        let wait = settle_wait(&at("2026-11-18T18:02:00.000Z"), now).unwrap();
+        assert_eq!(wait.as_secs(), 91);
+        assert!(settle_wait(&at("2026-11-18T18:01:00.000Z"), now).is_some());
+        // after waiting, the same timestamp no longer counts as recent
+        assert!(settle_wait(&at("2026-11-18T18:02:00.000Z"), now + 91).is_none());
+    }
+
+    #[test]
+    fn older_or_missing_edit_times_do_not_wait() {
+        let now = 1_795_024_950;
+        let at = |t: &str| vec![t.to_string()];
+        assert!(settle_wait(&at("2026-11-18T18:00:00.000Z"), now).is_none());
+        assert!(settle_wait(&at(""), now).is_none());
+    }
 
     #[test]
     fn slug_matches_prd_example() {
