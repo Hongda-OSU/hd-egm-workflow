@@ -233,8 +233,39 @@
   let settingsOpen = $state(false);
   let draft = $state<Models>({ goldfish_model: "", goldfish_effort: "", triager_model: "" });
   let savingModels = $state(false);
-  let firstField = $state<HTMLInputElement | null>(null);
   const dirty = $derived(!!settingsView && MODEL_KEYS.some((k) => draft[k].trim() !== settingsView!.models[k]));
+  const canSave = $derived(dirty && MODEL_KEYS.every((k) => draft[k].trim() !== ""));
+  // Neither CLI can list the models an account may use, so the menus hold
+  // names known to exist; anything else goes through "其他…".
+  const OTHER = "__other__";
+  const MODEL_CHOICES = {
+    goldfish_model: ["gpt-6.1-sol"],
+    triager_model: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-2"],
+  };
+  type ModelKey = keyof typeof MODEL_CHOICES;
+  let custom = $state<Record<ModelKey, boolean>>({ goldfish_model: false, triager_model: false });
+  let customEls = $state<Record<ModelKey, HTMLInputElement | null>>({ goldfish_model: null, triager_model: null });
+  const choicesOf = (k: ModelKey) => {
+    const d = settingsView?.defaults[k];
+    return d && !MODEL_CHOICES[k].includes(d) ? [d, ...MODEL_CHOICES[k]] : MODEL_CHOICES[k];
+  };
+
+  async function pickModel(k: ModelKey, v: string) {
+    if (v === OTHER) {
+      custom[k] = true;
+      draft[k] = "";
+      await tick();
+      customEls[k]?.focus();
+    } else {
+      custom[k] = false;
+      draft[k] = v;
+    }
+  }
+
+  function restoreDefault(k: keyof Models) {
+    draft[k] = settingsView?.defaults[k] ?? draft[k];
+    if (k !== "goldfish_effort") custom[k] = false;
+  }
   const effortOptions = $derived(
     EFFORTS.includes(draft.goldfish_effort) ? EFFORTS : [...EFFORTS, draft.goldfish_effort],
   );
@@ -243,16 +274,17 @@
     try {
       settingsView = await api.getSettings();
       draft = { ...settingsView.models };
+      for (const k of ["goldfish_model", "triager_model"] as const) custom[k] = !choicesOf(k).includes(draft[k]);
       settingsOpen = true;
       await tick();
-      firstField?.focus();
+      document.getElementById("goldfish-model")?.focus();
     } catch (e) {
       flash(String(e), true);
     }
   }
 
   async function saveSettings() {
-    if (!dirty || savingModels) return;
+    if (!canSave || savingModels) return;
     savingModels = true;
     try {
       await api.saveModels({
@@ -589,7 +621,25 @@
     {@const d = settingsView?.defaults[key] ?? ""}
     {#if draft[key].trim() !== d}
       · <span class="changed-text">缺省是 {d}</span> ·
-      <button type="button" class="link-btn" onclick={() => (draft[key] = d)}>恢复缺省</button>
+      <button type="button" class="link-btn" onclick={() => restoreDefault(key)}>恢复缺省</button>
+    {/if}
+  {/snippet}
+
+  {#snippet modelPicker(key: ModelKey, id: string, cli: string, base: string)}
+    {@const d = settingsView?.defaults[key] ?? ""}
+    <select {id} class="text-in select" class:changed={draft[key].trim() !== d}
+      value={custom[key] ? OTHER : draft[key]} onchange={(e) => pickModel(key, e.currentTarget.value)}>
+      {#each choicesOf(key) as m (m)}
+        <option value={m}>{m}{m === d ? "（缺省）" : ""}</option>
+      {/each}
+      <option value={OTHER}>其他…</option>
+    </select>
+    {#if custom[key]}
+      <input class="text-in custom-in" bind:this={customEls[key]} bind:value={draft[key]}
+        aria-label="{cli} 模型名" placeholder="{cli} 支持的模型名" spellcheck="false" autocomplete="off" />
+    {/if}
+    {#if base || custom[key] || draft[key].trim() !== d}
+      <div class="hint">{custom[key] ? `填 ${cli} 支持的模型名` : base} {@render backToDefault(key)}</div>
     {/if}
   {/snippet}
 
@@ -608,9 +658,7 @@
           <div class="field">
             <label for="goldfish-model">金鱼模型</label>
             <div>
-              <input id="goldfish-model" class="text-in" class:changed={draft.goldfish_model.trim() !== settingsView.defaults.goldfish_model}
-                bind:this={firstField} bind:value={draft.goldfish_model} spellcheck="false" autocomplete="off" />
-              <div class="hint">4 条金鱼共用这一个模型 {@render backToDefault("goldfish_model")}</div>
+              {@render modelPicker("goldfish_model", "goldfish-model", "codex", "4 条金鱼共用这一个模型")}
             </div>
           </div>
           <div class="field">
@@ -630,11 +678,7 @@
           <div class="field">
             <label for="triager-model">整理员模型</label>
             <div>
-              <input id="triager-model" class="text-in" class:changed={draft.triager_model.trim() !== settingsView.defaults.triager_model}
-                bind:value={draft.triager_model} spellcheck="false" autocomplete="off" />
-              {#if draft.triager_model.trim() !== settingsView.defaults.triager_model}
-                <div class="hint">{@render backToDefault("triager_model")}</div>
-              {/if}
+              {@render modelPicker("triager_model", "triager-model", "claude", "")}
             </div>
           </div>
           {#if dirty}
@@ -677,7 +721,7 @@
 
         <div class="dialog-foot">
           <button type="button" class="secondary" onclick={() => (settingsOpen = false)}>取消</button>
-          <button type="button" class="secondary strong" disabled={!dirty || savingModels} onclick={saveSettings}>
+          <button type="button" class="secondary strong" disabled={!canSave || savingModels} onclick={saveSettings}>
             {savingModels ? "保存中…" : "保存"}
           </button>
         </div>
@@ -1344,6 +1388,8 @@
   .text-in { width: 100%; height: 32px; box-sizing: border-box; padding: 0 10px; border: 1px solid rgba(0,0,0,.14); border-radius: 7px; background: #fff; color: #1f2328; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
   .text-in:focus { outline: none; border-color: #4a5a7a; }
   .text-in.changed { border-color: #b85414; }
+  .select { appearance: none; -webkit-appearance: none; padding-right: 28px; cursor: pointer; background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2.5 4l2.5 2.5L7.5 4' fill='none' stroke='%235f6670' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 10px center; }
+  .custom-in { margin-top: 6px; }
   .hint { margin-top: 4px; font-size: 11px; line-height: 1.5; color: #5f6670; }
   .changed-text { color: #b85414; }
   .link-btn { padding: 0; background: none; border: none; color: #4a5a7a; cursor: pointer; font: inherit; font-size: 12px; }
