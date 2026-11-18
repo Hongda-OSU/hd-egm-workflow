@@ -1,5 +1,7 @@
 //! PRD-specific block handling: splitting off the key-decision list (PRD §7.5).
 
+use serde::Serialize;
+
 use crate::markdown::plain;
 use crate::notion::Block;
 use crate::Result;
@@ -32,18 +34,11 @@ fn is_key_decisions_heading(b: &Block) -> bool {
 /// has no list items, because a round must not start without exactly one
 /// (PRD §6.3, §7.6).
 pub fn split_key_decisions(blocks: Vec<Block>) -> Result<(Vec<Block>, Vec<Block>)> {
-    if blocks.iter().filter(|b| is_key_decisions_heading(b)).count() > 1 {
-        return Err("PRD has more than one 关键决策清单 heading; ask the elephant to keep one".into());
-    }
-    let start = blocks
-        .iter()
-        .position(is_key_decisions_heading)
-        .ok_or("PRD has no 关键决策清单 section; ask the elephant to add it")?;
-    let level = heading_level(&blocks[start]).unwrap_or(1);
-    let end = blocks[start + 1..]
-        .iter()
-        .position(|b| heading_level(b).is_some_and(|l| l <= level))
-        .map_or(blocks.len(), |i| start + 1 + i);
+    let (start, end) = key_section(&blocks).map_err(|p| match p {
+        KeyProblem::Missing => "PRD has no 关键决策清单 section; ask the elephant to add it",
+        KeyProblem::Duplicate => "PRD has more than one 关键决策清单 heading; ask the elephant to keep one",
+        KeyProblem::Empty => "PRD's 关键决策清单 section is empty; ask the elephant to fill it",
+    })?;
 
     let divider_before = start > 0 && blocks[start - 1].kind() == "divider";
 
@@ -59,14 +54,70 @@ pub fn split_key_decisions(blocks: Vec<Block>) -> Result<(Vec<Block>, Vec<Block>
             body.push(b);
         }
     }
-
-    let has_items = key[1..].iter().any(|b| {
-        matches!(b.kind(), "bulleted_list_item" | "numbered_list_item" | "to_do")
-    });
-    if !has_items {
-        return Err("PRD's 关键决策清单 section is empty; ask the elephant to fill it".into());
-    }
     Ok((body, key))
+}
+
+fn is_list_item(b: &Block) -> bool {
+    matches!(b.kind(), "bulleted_list_item" | "numbered_list_item" | "to_do")
+}
+
+/// Why a PRD's key-decision section cannot be used (PRD §6.3 preflight).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyProblem {
+    Missing,
+    Duplicate,
+    Empty,
+}
+
+/// The key-decision section as a `start..end` range of top-level blocks:
+/// from its heading to the next heading of the same or higher level.
+fn key_section(blocks: &[Block]) -> std::result::Result<(usize, usize), KeyProblem> {
+    let mut found = blocks.iter().enumerate().filter(|(_, b)| is_key_decisions_heading(b)).map(|(i, _)| i);
+    let start = found.next().ok_or(KeyProblem::Missing)?;
+    if found.next().is_some() {
+        return Err(KeyProblem::Duplicate);
+    }
+    let level = heading_level(&blocks[start]).unwrap_or(1);
+    let end = blocks[start + 1..]
+        .iter()
+        .position(|b| heading_level(b).is_some_and(|l| l <= level))
+        .map_or(blocks.len(), |i| start + 1 + i);
+    if !blocks[start + 1..end].iter().any(is_list_item) {
+        return Err(KeyProblem::Empty);
+    }
+    Ok((start, end))
+}
+
+/// What the app shows before a PRD's first round: its section headings and
+/// whether its key-decision list is usable. Needs only top-level blocks.
+#[derive(Debug, Serialize)]
+pub struct Outline {
+    /// Headings of the top level in use, the key-decision one left out.
+    pub sections: Vec<String>,
+    pub key_heading: Option<String>,
+    /// Top-level list items in the section, counted as `count_key_items` does.
+    pub key_items: usize,
+    pub key_problem: Option<KeyProblem>,
+}
+
+pub fn outline(blocks: &[Block]) -> Outline {
+    let text = |b: &Block| plain(&b.data()["rich_text"]).trim().to_string();
+    let top = blocks.iter().filter_map(heading_level).min();
+    let sections = blocks
+        .iter()
+        .filter(|b| top.is_some() && heading_level(b) == top && !is_key_decisions_heading(b))
+        .map(text)
+        .collect();
+    match key_section(blocks) {
+        Ok((start, end)) => Outline {
+            sections,
+            key_heading: Some(text(&blocks[start])),
+            key_items: blocks[start + 1..end].iter().filter(|b| is_list_item(b)).count(),
+            key_problem: None,
+        },
+        Err(p) => Outline { sections, key_heading: None, key_items: 0, key_problem: Some(p) },
+    }
 }
 
 /// Number of key decisions in `key-decisions.md`: each top-level list item
@@ -138,6 +189,34 @@ mod tests {
         .unwrap();
         assert_eq!(ids(&body), vec!["7.5 关键决策清单（写在 PRD 里）", "说明"]);
         assert_eq!(ids(&key), vec!["11. 关键决策清单", "k1"]);
+    }
+
+    #[test]
+    fn outline_lists_top_sections_and_checks_the_key_list() {
+        let o = outline(&blocks(vec![
+            b("heading_2", "1. 背景"),
+            b("heading_3", "1.1 细节"),
+            b("heading_2", "2. 数据流"),
+            b("heading_2", "11. 关键决策清单"),
+            b("bulleted_list_item", "k1"),
+            b("numbered_list_item", "k2"),
+            b("paragraph", "说明"),
+        ]));
+        assert_eq!(o.sections, vec!["1. 背景", "2. 数据流"]);
+        assert_eq!(o.key_heading.as_deref(), Some("11. 关键决策清单"));
+        assert_eq!((o.key_items, o.key_problem), (2, None));
+
+        let missing = outline(&blocks(vec![b("heading_2", "1. 背景")]));
+        assert_eq!(missing.key_problem, Some(KeyProblem::Missing));
+        let empty = outline(&blocks(vec![b("heading_2", "关键决策清单"), b("paragraph", "x")]));
+        assert_eq!(empty.key_problem, Some(KeyProblem::Empty));
+        let twice = outline(&blocks(vec![
+            b("heading_2", "关键决策清单"),
+            b("bulleted_list_item", "k1"),
+            b("heading_2", "关键决策清单"),
+            b("bulleted_list_item", "k2"),
+        ]));
+        assert_eq!(twice.key_problem, Some(KeyProblem::Duplicate));
     }
 
     #[test]

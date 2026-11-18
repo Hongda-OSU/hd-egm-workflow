@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import {
     api,
     onProgress,
@@ -8,6 +8,7 @@
     type AppStatus,
     type Issue,
     type Models,
+    type Outline,
     type PrdDetail,
     type PrdItem,
     type PrdList,
@@ -412,6 +413,54 @@
     detail = loaded;
     const last = Math.max(0, (detail?.rounds.length ?? 1) - 1);
     if (!keepPosition || roundIdx > last) roundIdx = last;
+  }
+
+  // Before a PRD's first round: its sections and key-decision check, read
+  // from Notion so a missing list shows before "start" is clicked.
+  let outline = $state<{ id: string; data: Outline | null; error: string | null } | null>(null);
+  const fresh = $derived(!!selectedItem && !booting && (!detail || detail.rounds.length === 0));
+  const keyBad = $derived(!!outline && outline.id === selectedId && !!outline.data?.key_problem);
+  const KEY_PROBLEM = {
+    missing: { text: "缺「关键决策清单」", hint: "让写 PRD 的 Claude 补上，只列正文里写明的决定" },
+    duplicate: { text: "「关键决策清单」出现了不止一次", hint: "让写 PRD 的 Claude 只保留一节" },
+    empty: { text: "「关键决策清单」是空的", hint: "让写 PRD 的 Claude 补上条目，只列正文里写明的决定" },
+  };
+
+  async function loadOutline(id: string) {
+    outline = { id, data: null, error: null };
+    try {
+      const data = await api.prdOutline(id);
+      if (selectedId === id) outline = { id, data, error: null };
+    } catch (e) {
+      if (selectedId === id) outline = { id, data: null, error: String(e) };
+    }
+  }
+
+  $effect(() => {
+    const id = selectedId;
+    if (fresh && id && untrack(() => outline?.id) !== id) loadOutline(id);
+  });
+
+  function recheckFresh() {
+    checkStatus();
+    if (selectedId) loadOutline(selectedId);
+  }
+
+  function keyPrompt(problem: keyof typeof KEY_PROBLEM, title: string): string {
+    const only = "只列正文里已经写明的决定，不要新增决定，也不要改正文。";
+    if (problem === "duplicate") return `「${title}」里「关键决策清单」这个标题出现了不止一次。请只保留末尾那一节，把其他的内容合并进去，不要改正文。`;
+    if (problem === "empty")
+      return `「${title}」末尾的「关键决策清单」是空的。请用圆点列表补上这份 PRD 里已经做出的关键决定，每条一句话。${only}`;
+    return `请在「${title}」末尾加一节「关键决策清单」：每条一句话、用圆点列表，列出这份 PRD 里已经做出的关键决定（技术选型、范围取舍、数据怎么存和同步、明确不做的事等）。${only}`;
+  }
+
+  async function copyKeyPrompt(problem: keyof typeof KEY_PROBLEM) {
+    try {
+      await api.copyText(keyPrompt(problem, selectedItem?.title ?? ""));
+      flash("已复制，贴给写 PRD 的 Claude");
+    } catch (e) {
+      flash(String(e), true);
+    }
   }
 
   async function select(id: string) {
@@ -827,22 +876,77 @@
           </div>
           <p class="live-foot">通常 2～3 分钟。可以先去做别的事；中途关掉 app 也没关系，下次打开能接着跑没完成的部分。</p>
         </section>
+      {:else if fresh && selectedItem}
+        {@const o = outline?.id === selectedId ? outline : null}
+        <section class="fresh">
+          <div class="fresh-inner">
+            <div>
+              <div class="muted small-text">还没审过 ·
+                <button type="button" class="link-btn small-text" onclick={() => selectedItem && api.openNotion(selectedItem.page_id)}>在 Notion 打开</button>
+              </div>
+              <h1 class="fresh-title">{selectedItem.title}</h1>
+            </div>
+
+            <div class="prd-card">
+              <div class="label">这份 PRD</div>
+              {#if !o || (!o.data && !o.error)}
+                <p class="loading" role="status">{@render dots()}正在从 Notion 读取章节…</p>
+              {:else if o.error}
+                <p class="muted small-text">读不到 Notion，开跑时会再检查一次。（{o.error}）</p>
+              {:else if o.data}
+                {#if o.data.sections.length}
+                  <ul class="sections">
+                    {#each o.data.sections as h, i (i)}<li>{h}</li>{/each}
+                  </ul>
+                {:else}
+                  <p class="muted small-text">没找到章节标题。</p>
+                {/if}
+                {#if o.data.key_problem}
+                  {@const kp = KEY_PROBLEM[o.data.key_problem]}
+                  {@const problem = o.data.key_problem}
+                  <div class="key-row bad">
+                    <svg class="key-mark" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" fill="none" stroke="#b3362b" stroke-width="1.6" stroke-linecap="round" /></svg>
+                    <span class="key-bad">{kp.text}</span>
+                    <span class="muted key-hint">{kp.hint}</span>
+                    <button type="button" class="secondary small-btn key-copy" onclick={() => copyKeyPrompt(problem)}>复制给 Claude 的话</button>
+                  </div>
+                {:else}
+                  <div class="key-row">
+                    <svg class="key-mark" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="#1f7a4d" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                    <span class="strong">{o.data.key_heading}</span>
+                    <span class="muted key-hint">{o.data.key_items} 条 · 金鱼看不到，整理员拿它算命中率</span>
+                  </div>
+                {/if}
+              {/if}
+            </div>
+
+            <div class="env-line">
+              {#if !status}
+                <span>{@render dots()}正在检查环境…</span>
+              {:else if blocked}
+                <span class="bad-text">环境有问题，见顶部的红色提示</span>
+              {:else}
+                <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="#1f7a4d" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                <span>Notion、codex {status.codex_version ?? ""}、claude {status.claude_version ?? ""} 都正常</span>
+              {/if}
+              <button type="button" class="link-btn env-recheck" disabled={checking} onclick={recheckFresh}>{checking ? "检查中…" : "重新检查"}</button>
+            </div>
+
+            <div class="fresh-foot">
+              <span class="flow">拉取快照 → 4 条金鱼审稿 → 整理员归类 → 你拍板<span class="faint"> · 约 2～3 分钟，用订阅额度</span></span>
+              <span class="fresh-go">
+                {#if keyBad}<span class="blocked-hint">先处理清单</span>{:else if blocked}<span class="blocked-hint">先解决上面的问题</span>{/if}
+                <button type="button" class="secondary small-btn" disabled={!!running || blocked || keyBad} onclick={() => run("start")}>
+                  开始第 1 轮 →
+                </button>
+              </span>
+            </div>
+          </div>
+        </section>
       {:else if !detail || detail.rounds.length === 0}
         <section class="empty">
           <div class="muted">还没审过</div>
           <h1>{selectedItem?.title ?? "选一份 PRD"}</h1>
-          {#if selectedItem}
-            <ol class="first-steps">
-              <li>从 Notion 拉取最新版本，存成快照</li>
-              <li>4 条金鱼各开一个零记忆会话审稿</li>
-              <li>整理员把结果归类，交给你拍板</li>
-            </ol>
-            <button type="button" class="secondary big-btn" disabled={!!running || blocked} onclick={() => run("start")}>
-              开始第 1 轮
-              <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8M7 3l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            </button>
-            {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{:else}<span class="muted small-text">通常 2～3 分钟，用的是订阅额度</span>{/if}
-          {/if}
         </section>
       {:else}
         <div class="center-head">
@@ -1233,10 +1337,6 @@
   h2 { font-size: 16px; font-weight: 600; line-height: 1.5; margin: 10px 0 0; }
   .empty, .running { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 40px; text-align: center; }
   .empty p { max-width: 420px; line-height: 1.6; margin: 0; }
-  .first-steps { margin: 0; padding: 14px 18px; list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 8px; text-align: left; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; color: #2b3240; }
-  .first-steps li { counter-increment: step; display: flex; align-items: baseline; gap: 10px; }
-  .first-steps li::before { content: counter(step); flex: none; width: 18px; height: 18px; display: inline-grid; place-items: center; border-radius: 50%; background: #ecebe5; color: #5f6670; font-size: 11px; font-weight: 600; }
-  .big-btn { min-height: 40px; padding: 0 18px; gap: 8px; border-color: rgba(0,0,0,.22); border-radius: 9px; font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
   .steps { margin-top: 10px; }
   .step { padding: 7px 0; border-bottom: 1px solid rgba(0,0,0,.06); }
   .step-row { display: flex; align-items: center; gap: 10px; }
@@ -1408,4 +1508,23 @@
   .ok-text { color: #1f7a4d; font-size: 12px; }
   .bad-text { color: #b3362b; font-size: 12px; }
   .dialog-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px 16px; border-top: 1px solid rgba(0,0,0,.08); }
+  .fresh { flex: 1; min-height: 0; overflow-y: auto; padding: 22px; }
+  .fresh-inner { max-width: 640px; display: flex; flex-direction: column; gap: 14px; }
+  .fresh-title { margin: 4px 0 0; font-size: 20px; font-weight: 600; }
+  .fresh .link-btn.small-text { font-size: 11px; }
+  .prd-card { padding: 14px 16px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; }
+  .prd-card p { margin: 0; }
+  .sections { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; row-gap: 4px; font-size: 12px; color: #2b3240; }
+  .key-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding: 8px 10px; border-radius: 7px; background: #f4f3ef; font-size: 12px; }
+  .key-row.bad { background: none; border: 1px dashed #e3b5b0; }
+  .key-mark { flex: none; }
+  .key-bad { color: #b3362b; font-weight: 600; }
+  .key-hint { font-size: 11px; }
+  .key-copy { margin-left: auto; }
+  .env-line { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #5f6670; }
+  .env-recheck { margin-left: auto; }
+  .fresh-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding-top: 14px; border-top: 1px solid rgba(0,0,0,.08); }
+  .flow { font-size: 12px; color: #5f6670; }
+  .flow .faint { color: #8a8f96; }
+  .fresh-go { margin-left: auto; display: inline-flex; align-items: center; gap: 10px; }
 </style>

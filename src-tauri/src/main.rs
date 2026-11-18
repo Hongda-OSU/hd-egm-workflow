@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use egm_core::model::{Advice, Decision, Triage};
-use egm_core::notion::{compact_id, Notion};
+use egm_core::notion::{compact_id, Block, Notion};
+use egm_core::prd;
 use egm_core::review::{self, RoundVerdicts};
 use egm_core::settings::{self as cfg, CliVersions, Models, Settings};
 use egm_core::store::{self, Lock, PrdStatus, Stage, Step};
@@ -322,6 +323,15 @@ async fn open_notion(page_id: String) -> CmdResult<()> {
     Ok(())
 }
 
+/// Section headings and the key-decision check for a PRD not reviewed yet,
+/// so problems show before a run is started. Read-only, top-level blocks.
+#[tauri::command]
+async fn prd_outline(page_id: String) -> CmdResult<prd::Outline> {
+    let notion = Notion::from_keychain().map_err(err)?;
+    let blocks: Vec<Block> = notion.children(&page_id).await.map_err(err)?.into_iter().map(Block::from_json).collect();
+    Ok(prd::outline(&blocks))
+}
+
 /// Shows a path with the home folder as `~`, as settings.json writes it.
 fn tilde(p: &Path) -> String {
     match p.strip_prefix(cfg::home()) {
@@ -388,7 +398,8 @@ fn main() {
             open_notion,
             get_settings,
             save_models,
-            reveal
+            reveal,
+            prd_outline
         ])
         .run(tauri::generate_context!())
         .expect("error while running HD EGM Workflow");

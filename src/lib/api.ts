@@ -106,6 +106,15 @@ export interface AppStatus {
   verified: { codex: string; claude: string };
 }
 
+export type KeyProblem = "missing" | "duplicate" | "empty";
+
+export interface Outline {
+  sections: string[];
+  key_heading: string | null;
+  key_items: number;
+  key_problem: KeyProblem | null;
+}
+
 export interface Models {
   goldfish_model: string;
   goldfish_effort: string;
@@ -135,6 +144,7 @@ export const api = {
   getSettings: () => invoke<SettingsView>("get_settings"),
   saveModels: (models: Models) => invoke<void>("save_models", { models }),
   reveal: (which: "data" | "settings") => invoke<void>("reveal", { which }),
+  prdOutline: (pageId: string) => invoke<Outline>("prd_outline", { pageId }),
 };
 
 export function onProgress(cb: (p: { page_id: string; line: string }) => void): Promise<UnlistenFn> {
