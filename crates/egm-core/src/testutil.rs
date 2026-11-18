@@ -37,6 +37,7 @@ pub fn triage_in(round: u32, issues: Vec<Issue>, hits: usize, total: usize) -> T
         key_decisions,
         spec_checks: vec![],
         issues,
+        discarded: vec![],
     };
     Triage::from_output(round, out)
 }

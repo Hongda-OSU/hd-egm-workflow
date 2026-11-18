@@ -198,20 +198,26 @@ fn role_name(r: Role) -> &'static str {
 /// Every issue must trace back to real goldfish entries, and the goldfish
 /// in its `refs` must be exactly its `source` + `also_from`, since those
 /// decide which GO lines it counts toward.
+/// Parses "critic#3" into ("critic", 3), checking the goldfish exists and
+/// has that many entries. `owner` names the issue or list in errors.
+fn parse_ref(owner: &str, r: &str, fish_len: &[(&'static str, usize)]) -> Result<(&'static str, usize)> {
+    let bad = || format!("{owner}: ref {r} is not <goldfish>#<index>");
+    let (name, idx) = r.split_once('#').ok_or_else(bad)?;
+    let idx: usize = idx.parse().map_err(|_| bad())?;
+    let (name, len) = *fish_len.iter().find(|(n, _)| *n == name).ok_or_else(bad)?;
+    if idx >= len {
+        return Err(format!("{owner}: ref {r} is out of range ({name} has {len} entries)").into());
+    }
+    Ok((name, idx))
+}
+
 fn check_refs(i: &Issue, fish_len: &[(&'static str, usize)]) -> Result<()> {
     if i.refs.is_empty() {
         return Err(format!("{}: refs is empty", i.id).into());
     }
     let mut named = Vec::new();
     for r in &i.refs {
-        let bad = || format!("{}: ref {r} is not <goldfish>#<index>", i.id);
-        let (name, idx) = r.split_once('#').ok_or_else(bad)?;
-        let idx: usize = idx.parse().map_err(|_| bad())?;
-        let (name, len) = *fish_len.iter().find(|(n, _)| *n == name).ok_or_else(bad)?;
-        if idx >= len {
-            return Err(format!("{}: ref {r} is out of range ({name} has {len} entries)", i.id).into());
-        }
-        named.push(name);
+        named.push(parse_ref(&i.id, r, fish_len)?.0);
     }
     let mut lines: Vec<&str> = std::iter::once(i.source).chain(i.also_from.iter().copied()).map(role_name).collect();
     for v in [&mut named, &mut lines] {
@@ -246,6 +252,28 @@ fn validate_triage(v: &Value, ctx: &TriageInputs) -> Result<TriageOutput> {
     ids.dedup();
     if ids.len() != out.issues.len() {
         return Err("duplicate issue ids".into());
+    }
+    // Every goldfish entry ends up in an issue or in `discarded` with a
+    // reason; the triager may not drop one silently (PRD §6.3).
+    let mut covered = std::collections::BTreeSet::new();
+    for r in out.issues.iter().flat_map(|i| &i.refs) {
+        covered.insert(parse_ref("issues", r, &ctx.fish_len)?);
+    }
+    for d in &out.discarded {
+        if d.reason.trim().is_empty() {
+            return Err(format!("discarded {} has no reason", d.reference).into());
+        }
+        covered.insert(parse_ref("discarded", &d.reference, &ctx.fish_len)?);
+    }
+    let missing: Vec<String> = ctx
+        .fish_len
+        .iter()
+        .flat_map(|&(name, len)| (0..len).map(move |k| (name, k)))
+        .filter(|e| !covered.contains(e))
+        .map(|(name, k)| format!("{name}#{k}"))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!("goldfish entries neither in an issue nor discarded: {missing:?}").into());
     }
     if out.key_decisions.len() != ctx.key_items {
         return Err(format!("scored {} key decisions, list has {}", out.key_decisions.len(), ctx.key_items).into());
@@ -525,7 +553,9 @@ mod tests {
             let mut i = issue("r3-01", Role::Critic, &[Role::Retell], Severity::High, None);
             i.refs = vec!["critic#1".into(), "retell#0".into()];
             edit(&mut i);
-            validate_triage(&triage_json(i), &ctx)
+            let mut t = triage_json(i);
+            t["discarded"] = serde_json::json!([{ "ref": "critic#0", "reason": "not a PRD problem" }]);
+            validate_triage(&t, &ctx)
         };
         assert!(check(&|_| {}).is_ok());
         assert!(check(&|i| i.rejected_as = Some("r2-09".into())).is_ok());
@@ -539,8 +569,48 @@ mod tests {
 
         let mut spec_short = triage_json(issue("r3-01", Role::Critic, &[], Severity::Low, None));
         spec_short["issues"][0]["refs"] = serde_json::json!(["critic#0"]);
+        spec_short["discarded"] = serde_json::json!([
+            { "ref": "critic#1", "reason": "duplicate wording" },
+            { "ref": "retell#0", "reason": "guessed right" }
+        ]);
         assert!(validate_triage(&spec_short, &ctx).is_ok());
         spec_short["spec_checks"] = serde_json::json!([]);
         assert!(validate_triage(&spec_short, &ctx).is_err(), "spec checks missing");
+    }
+
+    #[test]
+    fn triage_may_not_drop_goldfish_entries_silently() {
+        let ctx = TriageInputs {
+            round: 3,
+            key_items: 1,
+            spec_items: 1,
+            fish_len: [("retell", 0), ("critic", 2), ("ready", 1)],
+            rejected: &[],
+        };
+        let mut i = issue("r3-01", Role::Critic, &[], Severity::Low, None);
+        i.refs = vec!["critic#0".into()];
+        let with = |discarded: Value| {
+            let mut t = triage_json(i.clone());
+            t["discarded"] = discarded;
+            validate_triage(&t, &ctx)
+        };
+        let both = serde_json::json!([
+            { "ref": "critic#1", "reason": "same as critic#0" },
+            { "ref": "ready#0", "reason": "asks for code detail" }
+        ]);
+        assert!(with(both).is_ok());
+        let err = with(serde_json::json!([{ "ref": "critic#1", "reason": "dup" }])).unwrap_err();
+        assert!(err.to_string().contains("ready#0"), "{err}");
+        assert!(with(serde_json::json!([
+            { "ref": "critic#1", "reason": " " },
+            { "ref": "ready#0", "reason": "x" }
+        ])).is_err(), "empty reason");
+        assert!(with(serde_json::json!([
+            { "ref": "critic#1", "reason": "x" },
+            { "ref": "ready#5", "reason": "x" }
+        ])).is_err(), "discarded ref out of range");
+        let mut no_field = triage_json(i.clone());
+        no_field.as_object_mut().unwrap().remove("discarded");
+        assert!(validate_triage(&no_field, &ctx).is_err(), "discarded is required");
     }
 }

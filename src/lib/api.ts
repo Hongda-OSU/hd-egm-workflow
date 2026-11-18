@@ -30,6 +30,8 @@ export interface Triage {
   key_decision_hits: number;
   key_decision_total: number;
   spec_checks: { item: string; pass: boolean }[];
+  /** Goldfish entries left out of every issue; absent in older rounds. */
+  discarded?: { ref: string; reason: string }[];
   issues: Issue[];
 }
 

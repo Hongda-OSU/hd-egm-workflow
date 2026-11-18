@@ -4,7 +4,7 @@
   "description": "Triager output (PRD §7.3). Optional PRD fields are required here but nullable, so structured output stays strict. key_decision_hits / key_decision_total are filled in by the app from key_decisions.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["verdicts", "key_decisions", "spec_checks", "issues"],
+  "required": ["verdicts", "key_decisions", "spec_checks", "issues", "discarded"],
   "properties": {
     "verdicts": {
       "type": "object",
@@ -75,6 +75,19 @@
           "advice": { "type": "string", "enum": ["accept", "reject"] },
           "reason": { "type": "string" },
           "suggested_change": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "discarded": {
+      "type": "array",
+      "description": "Goldfish entries not referenced by any issue, each with why it was dropped. Every retell guess, critic issue and ready missing entry must be in some issue's refs or here; empty array when none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ref", "reason"],
+        "properties": {
+          "ref": { "type": "string", "description": "Same form as refs, e.g. critic#2." },
+          "reason": { "type": "string" }
         }
       }
     }

@@ -155,6 +155,16 @@ pub struct Issue {
     pub suggested_change: Option<String>,
 }
 
+/// A goldfish entry the triager left out of every issue, with why
+/// (PRD §6.3: the triager may not drop entries silently).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Discard {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub reason: String,
+}
+
 /// What the triager returns (`schemas/triage.schema.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -163,6 +173,7 @@ pub struct TriageOutput {
     pub key_decisions: Vec<KeyDecision>,
     pub spec_checks: Vec<SpecCheck>,
     pub issues: Vec<Issue>,
+    pub discarded: Vec<Discard>,
 }
 
 /// `round-N/triage.json` (PRD §7.3): triager output plus app-computed fields.
@@ -175,6 +186,9 @@ pub struct Triage {
     pub key_decision_total: u32,
     pub spec_checks: Vec<SpecCheck>,
     pub issues: Vec<Issue>,
+    /// Absent in rounds triaged before the field existed.
+    #[serde(default)]
+    pub discarded: Vec<Discard>,
 }
 
 impl Triage {
@@ -196,6 +210,7 @@ impl Triage {
             key_decisions: out.key_decisions,
             spec_checks: out.spec_checks,
             issues: out.issues,
+            discarded: out.discarded,
         }
     }
 
