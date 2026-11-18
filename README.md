@@ -69,7 +69,7 @@ Create `~/Library/Application Support/hd-egm-workflow/settings.json`. Rule pages
 }
 ```
 
-Each PRD needs a section titled 关键决策清单 (key decisions) at the end. The app strips it before the goldfish read the PRD, then scores their retell against it.
+Each PRD needs a key decisions section at the end, under the heading set by `KEY_DECISIONS_HEADING` in [`crates/egm-core/src/prd.rs`](crates/egm-core/src/prd.rs). The app strips it before the goldfish read the PRD, then scores their retell against it.
 
 ## Usage
 
