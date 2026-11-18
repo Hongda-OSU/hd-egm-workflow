@@ -28,9 +28,13 @@ fn is_key_decisions_heading(b: &Block) -> bool {
 /// The section starts at the heading titled "关键决策清单" (numbering aside) and
 /// runs to the next heading of the same or higher level, or the end. A
 /// divider right before it is dropped; child pages inside the range stay in
-/// the body. Fails when the section is missing or has no list items, because
-/// a round must not start without it (PRD §6.3).
+/// the body. Fails when the section is missing, appears more than once or
+/// has no list items, because a round must not start without exactly one
+/// (PRD §6.3, §7.6).
 pub fn split_key_decisions(blocks: Vec<Block>) -> Result<(Vec<Block>, Vec<Block>)> {
+    if blocks.iter().filter(|b| is_key_decisions_heading(b)).count() > 1 {
+        return Err("PRD has more than one 关键决策清单 heading; ask the elephant to keep one".into());
+    }
     let start = blocks
         .iter()
         .position(is_key_decisions_heading)
@@ -63,6 +67,20 @@ pub fn split_key_decisions(blocks: Vec<Block>) -> Result<(Vec<Block>, Vec<Block>
         return Err("PRD's 关键决策清单 section is empty; ask the elephant to fill it".into());
     }
     Ok((body, key))
+}
+
+/// Number of key decisions in `key-decisions.md`: each top-level list item
+/// is one (PRD §7.6), bulleted, numbered or to-do alike. Nested items and
+/// continuation lines are indented by the Markdown converter, so they do
+/// not count.
+pub fn count_key_items(markdown: &str) -> usize {
+    markdown
+        .lines()
+        .filter(|l| {
+            let digits = l.chars().take_while(char::is_ascii_digit).count();
+            l.starts_with("- ") || (digits > 0 && l[digits..].starts_with(". "))
+        })
+        .count()
 }
 
 #[cfg(test)]
@@ -120,6 +138,23 @@ mod tests {
         .unwrap();
         assert_eq!(ids(&body), vec!["7.5 关键决策清单（写在 PRD 里）", "说明"]);
         assert_eq!(ids(&key), vec!["11. 关键决策清单", "k1"]);
+    }
+
+    #[test]
+    fn a_second_section_is_an_error() {
+        let r = split_key_decisions(blocks(vec![
+            b("heading_2", "关键决策清单"),
+            b("bulleted_list_item", "k1"),
+            b("heading_2", "12. 关键决策清单"),
+            b("bulleted_list_item", "k2"),
+        ]));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn counts_top_level_items_of_any_list_kind() {
+        let md = "## 关键决策清单\n\n- a\n  - nested\n1. b\n2. c\n   continued\n- [ ] d\n- [x] e\n\nnote";
+        assert_eq!(count_key_items(md), 5);
     }
 
     #[test]

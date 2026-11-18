@@ -358,7 +358,7 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
         ];
         let inputs = TriageInputs {
             round,
-            key_items: key_decisions.lines().filter(|l| l.starts_with("- ")).count(),
+            key_items: crate::prd::count_key_items(&key_decisions),
             spec_items,
             fish_len,
             rejected: &rejections,
