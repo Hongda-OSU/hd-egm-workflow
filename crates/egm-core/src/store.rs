@@ -513,8 +513,8 @@ mod tests {
     #[test]
     fn slug_matches_prd_example() {
         assert_eq!(
-            slug("HD EGM Workflow · 产品文档", "40660d3c-f9f3-8108-8712-e6e662bb0f2c"),
-            "hd-egm-workflow-40660d3c"
+            slug("HD EGM Workflow · 产品文档", "aaaa1111-0000-4000-8000-000000000001"),
+            "hd-egm-workflow-aaaa1111"
         );
     }
 
@@ -523,8 +523,8 @@ mod tests {
         assert_eq!(slug("香港求职自动化", "36660d3cf9f381ff"), "36660d3c");
     }
 
-    const EGM: &str = "40660d3c-f9f3-8108-8712-e6e662bb0f2c";
-    const SAME_PREFIX: &str = "40660d3c-f9f3-8140-8d00-ed34fc94ea78";
+    const EGM: &str = "aaaa1111-0000-4000-8000-000000000001";
+    const SAME_PREFIX: &str = "aaaa1111-0000-4000-8000-000000000002";
 
     fn claim(data_dir: &Path, name: &str, page_id: &str) -> PathBuf {
         let dir = data_dir.join(name);
@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn find_prd_dir_matches_the_full_id_not_the_prefix() {
         let tmp = TempDir::new("find");
-        let egm = claim(tmp.path(), "hd-egm-workflow-40660d3c", EGM);
+        let egm = claim(tmp.path(), "hd-egm-workflow-aaaa1111", EGM);
         assert_eq!(find_prd_dir(tmp.path(), EGM), Some(egm.clone()));
         assert_eq!(find_prd_dir(tmp.path(), &compact_id(EGM)), Some(egm));
         assert_eq!(find_prd_dir(tmp.path(), SAME_PREFIX), None);
@@ -579,17 +579,17 @@ mod tests {
     #[test]
     fn new_prd_dir_avoids_a_name_owned_by_another_prd() {
         let tmp = TempDir::new("newdir");
-        assert_eq!(new_prd_dir(tmp.path(), "香港", EGM), tmp.path().join("40660d3c"));
-        claim(tmp.path(), "40660d3c", EGM);
+        assert_eq!(new_prd_dir(tmp.path(), "香港", EGM), tmp.path().join("aaaa1111"));
+        claim(tmp.path(), "aaaa1111", EGM);
         assert_eq!(
             new_prd_dir(tmp.path(), "照片", SAME_PREFIX),
-            tmp.path().join("40660d3c-f9f381408d00ed34fc94ea78")
+            tmp.path().join("aaaa1111-000040008000000000000002")
         );
         // A leftover dir without prd.json (failed first pull) is reused.
-        fs::create_dir_all(tmp.path().join("other-3e360d3c")).unwrap();
+        fs::create_dir_all(tmp.path().join("other-bbbb2222")).unwrap();
         assert_eq!(
-            new_prd_dir(tmp.path(), "Other", "3e360d3c-f9f3-812f-9e04-e7bf96e28c20"),
-            tmp.path().join("other-3e360d3c")
+            new_prd_dir(tmp.path(), "Other", "bbbb2222-0000-4000-8000-000000000003"),
+            tmp.path().join("other-bbbb2222")
         );
     }
 
