@@ -12,6 +12,7 @@
     type PrdList,
     type Role,
     type RuleItem,
+    type Step,
     type Verdict,
   } from "./lib/api";
 
@@ -33,7 +34,28 @@
   const ROLES: Role[] = ["retell", "critic", "ready"];
   const foundBy = (i: Issue) => ROLES.filter((r) => i.source === r || i.also_from.includes(r));
   const FISH_NAMES: Record<string, string> = { retell: "复述", critic: "找茬", ready: "开工", spec: "规范" };
-  const STEP_LABEL: Record<string, string> = { queued: "排队", running: "运行中", done: "完成", failed: "失败" };
+  // Shown only for a round that is not running now, so "running" means it
+  // was cut off (app closed or crashed) rather than still going.
+  const STEP_STATE: Record<Step["status"], string> = { queued: "没开始", running: "中断了", done: "完成", failed: "失败" };
+  const STEP_ORDER = ["retell", "critic", "ready", "spec"];
+  type StepRow = { name: string; status: Step["status"]; error: string | null };
+
+  function stepsOf(r: PrdDetail["rounds"][number]): StepRow[] {
+    const fish = Object.entries(r.fish_steps)
+      .sort(([a], [b]) => STEP_ORDER.indexOf(a) - STEP_ORDER.indexOf(b))
+      .map(([k, s]) => ({ name: `${FISH_NAMES[k] ?? k}金鱼`, status: s.status, error: s.error ?? null }));
+    return [...fish, { name: "整理员", status: r.triage_step.status, error: r.triage_step.error ?? null }];
+  }
+
+  function unfinishedSummary(steps: StepRow[]): string {
+    const names = (st: Step["status"]) => steps.filter((s) => s.status === st).map((s) => s.name).join("、");
+    const parts = [
+      names("failed") && `${names("failed")}失败了`,
+      names("running") && `${names("running")}中断了`,
+      names("queued") && `${names("queued")}还没开始`,
+    ].filter(Boolean);
+    return parts.length ? `${parts.join("，")}。` : "";
+  }
 
   let status = $state<AppStatus | null>(null);
   let prds = $state<PrdList | null>(null);
@@ -422,9 +444,16 @@
           <div class="muted">还没审过</div>
           <h1>{selectedItem?.title ?? "选一份 PRD"}</h1>
           {#if selectedItem}
-            <p class="muted">拉取 Notion 里的最新版本存成快照，4 条金鱼各开一个零记忆会话审稿，结果交给整理员归类。</p>
-            <button type="button" class="primary big" disabled={!!running || blocked} onclick={() => run("start")}>开始第 1 轮</button>
-            {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{/if}
+            <ol class="first-steps">
+              <li>从 Notion 拉取最新版本，存成快照</li>
+              <li>4 条金鱼各开一个零记忆会话审稿</li>
+              <li>整理员把结果归类，交给你拍板</li>
+            </ol>
+            <button type="button" class="secondary big-btn" disabled={!!running || blocked} onclick={() => run("start")}>
+              开始第 1 轮
+              <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6h8M7 3l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </button>
+            {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{:else}<span class="muted small-text">通常 2～3 分钟，用的是订阅额度</span>{/if}
           {/if}
         </section>
       {:else}
@@ -468,15 +497,29 @@
         {#if round && !triage}
           <section class="notice">
             {#if unfinished}
-              <p>这一轮没跑完。</p>
-              <ul>
-                {#each Object.entries(round.fish_steps) as [name, s]}
-                  <li>{FISH_NAMES[name]}金鱼：{STEP_LABEL[s.status]}{s.error ? ` — ${s.error}` : ""}</li>
+              {@const steps = stepsOf(round)}
+              <div class="strong">这一轮没跑完</div>
+              <p class="muted small-text">{unfinishedSummary(steps)}</p>
+              <div class="steps">
+                {#each steps as st (st.name)}
+                  <div class="step">
+                    <div class="step-row">
+                      <span class="step-mark {st.status}" aria-hidden="true">
+                        {#if st.status === "done"}
+                          <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                        {:else}<span class="dot"></span>{/if}
+                      </span>
+                      <span class="step-name">{st.name}</span>
+                      <span class="step-status {st.status}">{STEP_STATE[st.status]}</span>
+                    </div>
+                    {#if st.error}<div class="step-error mono">{st.error}</div>{/if}
+                  </div>
                 {/each}
-                <li>整理员：{STEP_LABEL[round.triage_step.status]}{round.triage_step.error ? ` — ${round.triage_step.error}` : ""}</li>
-              </ul>
-              <button type="button" class="primary" disabled={!!running || blocked} onclick={() => run("resume")}>继续跑没完成的部分</button>
-              {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{/if}
+              </div>
+              <div class="resume">
+                <button type="button" class="secondary" disabled={!!running || blocked} onclick={() => run("resume")}>继续跑没完成的部分</button>
+                {#if blocked}<span class="blocked-hint">先解决上面的问题</span>{:else}<span class="muted small-text">已完成的不会重跑</span>{/if}
+              </div>
             {:else}
               <p class="muted">这一轮只拉了快照，没有审稿结果。</p>
             {/if}
@@ -761,11 +804,27 @@
   .center-head { flex: none; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 22px 12px; }
   h1 { margin: 4px 0 0; font-size: 22px; font-weight: 600; }
   h2 { font-size: 16px; font-weight: 600; line-height: 1.5; margin: 10px 0 0; }
-  .primary { min-height: 38px; padding: 0 16px; background: #1f2328; color: #fff; border: none; border-radius: 8px; cursor: pointer; font-weight: 500; }
-  .primary:disabled { background: #b9b6ae; cursor: default; }
-  .primary.big { min-height: 44px; padding: 0 20px; }
   .empty, .running { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 40px; text-align: center; }
   .empty p { max-width: 420px; line-height: 1.6; margin: 0; }
+  .first-steps { margin: 0; padding: 14px 18px; list-style: none; counter-reset: step; display: flex; flex-direction: column; gap: 8px; text-align: left; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; color: #2b3240; }
+  .first-steps li { counter-increment: step; display: flex; align-items: baseline; gap: 10px; }
+  .first-steps li::before { content: counter(step); flex: none; width: 18px; height: 18px; display: inline-grid; place-items: center; border-radius: 50%; background: #ecebe5; color: #5f6670; font-size: 11px; font-weight: 600; }
+  .big-btn { min-height: 40px; padding: 0 18px; gap: 8px; border-color: rgba(0,0,0,.22); border-radius: 9px; font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+  .steps { margin-top: 10px; }
+  .step { padding: 7px 0; border-bottom: 1px solid rgba(0,0,0,.06); }
+  .step-row { display: flex; align-items: center; gap: 10px; }
+  .step-mark { width: 16px; display: inline-grid; place-items: center; }
+  .step-mark.done { color: #1f7a4d; }
+  .step-mark .dot { width: 8px; height: 8px; box-sizing: border-box; border-radius: 50%; border: 1.5px solid #b9b6ae; }
+  .step-mark.failed .dot { background: #b3362b; border-color: #b3362b; }
+  .step-mark.running .dot { background: #b85414; border-color: #b85414; }
+  .step-name { flex: 1; }
+  .step-status { color: #5f6670; }
+  .step-status.done { color: #1f7a4d; }
+  .step-status.failed { color: #b3362b; font-weight: 600; }
+  .step-status.running { color: #b85414; font-weight: 600; }
+  .step-error { margin: 2px 0 0 26px; color: #5f6670; white-space: pre-wrap; word-break: break-word; }
+  .resume { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
   .log { width: min(560px, 100%); max-height: 50vh; overflow-y: auto; text-align: left; margin: 0; padding: 12px 12px 12px 32px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 8px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.8; }
 
   .tabs { flex: none; display: flex; padding: 0 22px 14px; overflow-x: auto; }
@@ -773,7 +832,8 @@
   .tab.on { background: #fff; border-color: #1f2328; position: relative; z-index: 1; }
   .tab-top { display: flex; justify-content: space-between; width: 100%; font-weight: 600; }
   .verdict { font-size: 11px; font-weight: 600; border-radius: 4px; padding: 2px 8px; }
-  .notice { margin: 0 22px; padding: 16px 20px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; line-height: 1.7; }
+  .notice { margin: 0 22px; max-width: 560px; padding: 16px 20px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; line-height: 1.7; }
+  .notice > p { margin: 2px 0 0; }
 
   .panes { flex: 1; min-height: 0; display: flex; gap: 14px; padding: 0 22px 18px; }
   .card { min-width: 0; display: flex; flex-direction: column; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; min-height: 0; }
