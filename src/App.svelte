@@ -620,8 +620,8 @@
   {#snippet backToDefault(key: keyof Models)}
     {@const d = settingsView?.defaults[key] ?? ""}
     {#if draft[key].trim() !== d}
-      · <span class="changed-text">缺省是 {d}</span> ·
-      <button type="button" class="link-btn" onclick={() => restoreDefault(key)}>恢复缺省</button>
+      · <span class="changed-text">默认是 {d}</span> ·
+      <button type="button" class="link-btn" onclick={() => restoreDefault(key)}>恢复默认</button>
     {/if}
   {/snippet}
 
@@ -630,7 +630,7 @@
     <select {id} class="text-in select" class:changed={draft[key].trim() !== d}
       value={custom[key] ? OTHER : draft[key]} onchange={(e) => pickModel(key, e.currentTarget.value)}>
       {#each choicesOf(key) as m (m)}
-        <option value={m}>{m}{m === d ? "（缺省）" : ""}</option>
+        <option value={m}>{m}{m === d ? "（默认）" : ""}</option>
       {/each}
       <option value={OTHER}>其他…</option>
     </select>
