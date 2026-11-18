@@ -740,9 +740,12 @@
         {@const passes = t.spec_checks.filter((c) => c.pass)}
         <section>
           <h2 class="label">第 {round.n} 轮结论</h2>
-          <div class="verdict-card">
-            <span class="verdict-big" class:go={prd === "GO"}>{prd ?? "—"}</span>
-            {#if verdictNote}<span class="muted verdict-note">{verdictNote}</span>{/if}
+          <div class="line prd-line">
+            <div class="line-top">
+              <span class="strong">整份 PRD</span>
+              <span class="verdict" style={verdictStyle(prd)}>{prd ?? "—"}</span>
+            </div>
+            {#if verdictNote}<div class="line-why muted">{verdictNote}</div>{/if}
           </div>
           {#each lines as l (l.role)}
             <div class="line">
@@ -990,11 +993,8 @@
 
   .right { flex: 0 0 272px; min-height: 0; overflow-y: auto; background: #fbfaf7; border-left: 1px solid rgba(0,0,0,.08); padding: 16px; display: flex; flex-direction: column; gap: 18px; }
   .right section { display: flex; flex-direction: column; }
-  .verdict-card { display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: #fff; border: 1px solid rgba(0,0,0,.08); border-radius: 10px; }
-  .verdict-big { flex: none; font-size: 15px; font-weight: 700; color: #b3362b; }
-  .verdict-big.go { color: #1f7a4d; }
-  .verdict-note { font-size: 12px; line-height: 1.5; }
   .line { padding: 8px 0; border-bottom: 1px solid rgba(0,0,0,.06); }
+  .prd-line { padding-top: 0; border-bottom-color: rgba(0,0,0,.12); }
   .line-top { display: flex; justify-content: space-between; align-items: center; }
   .line-why { margin-top: 2px; font-size: 11px; line-height: 1.5; }
   .warn { margin: 6px 0 0; font-size: 11px; color: #a86b00; }
