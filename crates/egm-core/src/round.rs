@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 use crate::agents::{self, ClaudeConfig, CodexConfig};
 use crate::model::{Advice, Critic, Decision, Issue, Ready, Rejection, Retell, Role, Spec, Triage, TriageOutput, Verdict};
 use crate::settings::Settings;
-use crate::store::{read_state, write_json, write_state, Stage, StepStatus};
+use crate::store::{read_state, write_json, write_state, RoundState, Stage, StepStatus};
 use crate::Result;
 
 const FISH: [(&str, &str); 4] = [
@@ -51,6 +51,28 @@ impl RoundResult {
 
 fn read(path: &Path) -> Result<String> {
     fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()).into())
+}
+
+/// Like `read`, but a missing file is `None`. Any other failure is an
+/// error, never treated as empty (PRD §6.3).
+fn read_optional(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(t) => Ok(Some(t)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display()).into()),
+    }
+}
+
+/// Marks the triage step failed so it can be rerun, and returns the error
+/// to report.
+fn fail_triage(round_dir: &Path, state: &mut RoundState, e: String) -> crate::Error {
+    state.triage.status = StepStatus::Failed;
+    state.triage.error = Some(e.clone());
+    state.stage = Stage::Failed;
+    match write_state(round_dir, state) {
+        Ok(()) => format!("triage failed: {e}; run `egm resume` to retry").into(),
+        Err(w) => format!("triage failed: {e}; round.json could not be saved either: {w}").into(),
+    }
 }
 
 /// The round's frozen template; rounds started before templates were
@@ -153,7 +175,9 @@ pub fn collect_rejections(prd_dir: &Path, current: u32) -> Result<Vec<Rejection>
     let mut overturned = Vec::new();
     for k in 1..current {
         let dir = prd_dir.join(format!("round-{k}"));
-        let (Ok(t), Ok(d)) = (fs::read_to_string(dir.join("triage.json")), fs::read_to_string(dir.join("decisions.json"))) else {
+        // A round that was never triaged or decided has nothing to carry
+        // over; a file that exists but cannot be read stops the run.
+        let (Some(t), Some(d)) = (read_optional(&dir.join("triage.json"))?, read_optional(&dir.join("decisions.json"))?) else {
             continue;
         };
         let triage: Triage = serde_json::from_str(&t)?;
@@ -342,11 +366,19 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
         let step = state.fish.get_mut(name).ok_or("unknown goldfish")?;
         step.retries += retries;
         match result {
-            Ok(v) => {
-                write_json(&fish_dir.join(format!("{name}.json")), &v)?;
-                step.status = StepStatus::Done;
-                log(format!("{name}: done"));
-            }
+            // A save failure fails just this goldfish, so it can be rerun.
+            Ok(v) => match write_json(&fish_dir.join(format!("{name}.json")), &v) {
+                Ok(()) => {
+                    step.status = StepStatus::Done;
+                    log(format!("{name}: done"));
+                }
+                Err(e) => {
+                    let e = format!("cannot save output: {e}");
+                    log(format!("{name}: failed: {e}"));
+                    step.status = StepStatus::Failed;
+                    step.error = Some(e);
+                }
+            },
             Err(e) => {
                 step.status = StepStatus::Failed;
                 step.error = Some(e.to_string());
@@ -366,7 +398,9 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
     let triage_path = round_dir.join("triage.json");
     if state.triage.status != StepStatus::Done {
         let rejections = collect_rejections(prd_dir, round)?;
-        write_json(&round_dir.join("rejected-history.json"), &rejections)?;
+        if let Err(e) = write_json(&round_dir.join("rejected-history.json"), &rejections) {
+            return Err(fail_triage(round_dir, &mut state, format!("cannot save rejected-history.json: {e}")));
+        }
         let rejected = if rejections.is_empty() { "无".to_string() } else { serde_json::to_string_pretty(&rejections)? };
         let fish_text = |n: &str| read(&fish_dir.join(format!("{n}.json")));
         let prompt = template(round_dir, "triage")?
@@ -411,9 +445,12 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
             }
             state.triage.retries = attempt + 1;
         }
-        match result {
-            Ok(out) => {
-                write_json(&triage_path, &Triage::from_output(round, out))?;
+        let saved = result.and_then(|out| {
+            write_json(&triage_path, &Triage::from_output(round, out))
+                .map_err(|e| format!("cannot save triage.json: {e}").into())
+        });
+        match saved {
+            Ok(()) => {
                 state.triage.status = StepStatus::Done;
                 state.stage = Stage::Decide;
                 write_state(round_dir, &state)?;
@@ -422,13 +459,7 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
                 state.verdicts = Some(crate::review::refresh_verdicts(round_dir)?);
                 log("triage: done".into());
             }
-            Err(e) => {
-                state.triage.status = StepStatus::Failed;
-                state.triage.error = Some(e.to_string());
-                state.stage = Stage::Failed;
-                write_state(round_dir, &state)?;
-                return Err(format!("triage failed: {e}; run `egm resume` to retry").into());
-            }
+            Err(e) => return Err(fail_triage(round_dir, &mut state, e.to_string())),
         }
     }
 
@@ -497,6 +528,31 @@ mod tests {
             Some(vec![dec("r2-01", Advice::Accept), dec("r2-03", Advice::Reject)]),
         );
         assert_eq!(ids(&collect_rejections(p, 3).unwrap()), vec!["r1-03", "r2-03"]);
+    }
+
+    #[test]
+    fn an_unreadable_earlier_round_is_an_error_not_an_empty_history() {
+        let tmp = TempDir::new("unreadable");
+        let p = tmp.path();
+        fs::create_dir_all(p.join("round-1/triage.json")).unwrap(); // a dir, so reading fails
+        fs::write(p.join("round-1/decisions.json"), "[]").unwrap();
+        let err = collect_rejections(p, 2).unwrap_err();
+        assert!(err.to_string().contains("triage.json"), "{err}");
+    }
+
+    #[test]
+    fn a_failed_triage_save_marks_the_step_failed() {
+        let tmp = TempDir::new("failtriage");
+        let p = tmp.path();
+        let mut state: RoundState = serde_json::from_str(
+            r#"{"stage":"triage","fish":{},"triage":{"status":"running","retries":0,"error":null},"warnings":[]}"#,
+        )
+        .unwrap();
+        let err = fail_triage(p, &mut state, "cannot save triage.json: disk full".into());
+        assert!(err.to_string().contains("disk full"));
+        let saved = read_state(p).unwrap();
+        assert_eq!(saved.triage.status, StepStatus::Failed);
+        assert_eq!(saved.stage, Stage::Failed);
     }
 
     #[test]
