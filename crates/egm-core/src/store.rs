@@ -79,6 +79,11 @@ pub struct RoundState {
     /// Recomputed after triage and after every decision (PRD §6.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdicts: Option<crate::review::RoundVerdicts>,
+    /// Model settings frozen when the round started, so a rerun or resume
+    /// uses the same ones (PRD §6.3). None for rounds started before this
+    /// existed; those fall back to the current settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<crate::settings::Models>,
 }
 
 /// Directory name: ASCII slug of the title + first 8 chars of the page id.
@@ -377,12 +382,18 @@ pub async fn pull(notion: &Notion, settings: &Settings, page_id: &str) -> Result
     for (name, r) in &snap.rules {
         fs::write(tmp.join("rules").join(format!("{name}.md")), &r.markdown)?;
     }
+    // Freeze the prompt templates; reruns of this round read these.
+    fs::create_dir_all(tmp.join("prompts"))?;
+    for (name, text) in crate::round::PROMPT_TEMPLATES {
+        fs::write(tmp.join("prompts").join(format!("{name}.md")), text)?;
+    }
     let state = RoundState {
         stage: Stage::Fish,
         fish: FISH.iter().map(|f| (f.to_string(), Step::queued())).collect(),
         triage: Step::queued(),
         warnings: warnings.clone(),
         verdicts: None,
+        config: Some(settings.models()),
     };
     write_json(&tmp.join("round.json"), &state)?;
 
@@ -473,6 +484,17 @@ mod tests {
         fs::write(tmp.path().join(LOCK), "4000000").unwrap();
         let _held = Lock::acquire(tmp.path()).unwrap();
         assert_eq!(lock_holder(&tmp.path().join(LOCK)), Some(std::process::id()));
+    }
+
+    #[test]
+    fn round_state_without_config_still_reads() {
+        let old = r#"{"stage":"decide","fish":{},"triage":{"status":"done","retries":0,"error":null},"warnings":[]}"#;
+        let state: RoundState = serde_json::from_str(old).unwrap();
+        assert_eq!(state.config, None);
+        let mut state = state;
+        state.config = Some(crate::settings::Models::default());
+        let back: RoundState = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(back.config, Some(crate::settings::Models::default()));
     }
 
     #[test]

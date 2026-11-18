@@ -15,13 +15,22 @@ use crate::settings::Settings;
 use crate::store::{read_state, write_json, write_state, Stage, StepStatus};
 use crate::Result;
 
-const FISH: [(&str, &str, &str); 4] = [
-    ("retell", include_str!("../../../prompts/retell.md"), include_str!("../../../schemas/retell.schema.json")),
-    ("critic", include_str!("../../../prompts/critic.md"), include_str!("../../../schemas/critic.schema.json")),
-    ("ready", include_str!("../../../prompts/ready.md"), include_str!("../../../schemas/ready.schema.json")),
-    ("spec", include_str!("../../../prompts/spec.md"), include_str!("../../../schemas/spec.schema.json")),
+const FISH: [(&str, &str); 4] = [
+    ("retell", include_str!("../../../schemas/retell.schema.json")),
+    ("critic", include_str!("../../../schemas/critic.schema.json")),
+    ("ready", include_str!("../../../schemas/ready.schema.json")),
+    ("spec", include_str!("../../../schemas/spec.schema.json")),
 ];
-const TRIAGE_PROMPT: &str = include_str!("../../../prompts/triage.md");
+/// Prompt templates built into this binary. `store::pull` copies them into
+/// `round-N/prompts/` when a round starts, and runs read that copy, so a
+/// rebuilt app does not change a round already under way (PRD §6.3).
+pub const PROMPT_TEMPLATES: [(&str, &str); 5] = [
+    ("retell", include_str!("../../../prompts/retell.md")),
+    ("critic", include_str!("../../../prompts/critic.md")),
+    ("ready", include_str!("../../../prompts/ready.md")),
+    ("spec", include_str!("../../../prompts/spec.md")),
+    ("triage", include_str!("../../../prompts/triage.md")),
+];
 const TRIAGE_SCHEMA: &str = include_str!("../../../schemas/triage.schema.json");
 const TRIAGE_SYSTEM: &str = "You are the triager in a cross-model PRD review workflow. \
 Follow the triage rules in the user's message and return only the structured result.";
@@ -42,6 +51,20 @@ impl RoundResult {
 
 fn read(path: &Path) -> Result<String> {
     fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()).into())
+}
+
+/// The round's frozen template; rounds started before templates were
+/// frozen have none and use the built-in one.
+fn template(round_dir: &Path, name: &str) -> Result<String> {
+    let frozen = round_dir.join("prompts").join(format!("{name}.md"));
+    if frozen.exists() {
+        return read(&frozen);
+    }
+    PROMPT_TEMPLATES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, t)| t.to_string())
+        .ok_or_else(|| format!("no prompt template named {name}").into())
 }
 
 /// The 交付前检查清单 items of hd-prd-rules, minus those a goldfish cannot
@@ -257,18 +280,21 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
     let fish_dir = round_dir.join("fish");
     fs::create_dir_all(&fish_dir)?;
 
+    // Models frozen at round start; older rounds use the current settings.
+    let models = state.config.clone().unwrap_or_else(|| settings.models());
+
     // Fish stage.
     let cfg = CodexConfig {
         home: settings.codex_home(),
-        model: settings.goldfish_model.clone(),
-        effort: settings.goldfish_effort.clone(),
+        model: models.goldfish_model.clone(),
+        effort: models.goldfish_effort.clone(),
     };
     let mut set = JoinSet::new();
-    for (name, template, schema) in FISH {
+    for (name, schema) in FISH {
         if state.fish.get(name).is_some_and(|s| s.status == StepStatus::Done) {
             continue;
         }
-        let prompt = template
+        let prompt = template(round_dir, name)?
             .replace("{{goldfish_rules}}", goldfish_rules.trim())
             .replace("{{checklist}}", &checklist)
             .replace("{{prd}}", prd.trim());
@@ -315,7 +341,7 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
         write_json(&round_dir.join("rejected-history.json"), &rejections)?;
         let rejected = if rejections.is_empty() { "无".to_string() } else { serde_json::to_string_pretty(&rejections)? };
         let fish_text = |n: &str| read(&fish_dir.join(format!("{n}.json")));
-        let prompt = TRIAGE_PROMPT
+        let prompt = template(round_dir, "triage")?
             .replace("{{round}}", &round.to_string())
             .replace("{{elephant_rules}}", elephant_rules.trim())
             .replace("{{key_decisions}}", key_decisions.trim())
@@ -337,7 +363,7 @@ pub async fn run(settings: &Settings, round_dir: &Path, mut log: impl FnMut(Stri
             fish_len,
             rejected: &rejections,
         };
-        let claude = ClaudeConfig { model: settings.triager_model.clone() };
+        let claude = ClaudeConfig { model: models.triager_model.clone() };
 
         state.stage = Stage::Triage;
         state.triage.status = StepStatus::Running;
@@ -403,6 +429,18 @@ mod tests {
 
     fn ids(r: &[Rejection]) -> Vec<&str> {
         r.iter().map(|x| x.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_round_uses_its_frozen_template_else_the_built_in_one() {
+        let tmp = TempDir::new("template");
+        let p = tmp.path();
+        assert_eq!(template(p, "critic").unwrap(), PROMPT_TEMPLATES[1].1);
+        fs::create_dir_all(p.join("prompts")).unwrap();
+        fs::write(p.join("prompts/critic.md"), "frozen {{prd}}").unwrap();
+        assert_eq!(template(p, "critic").unwrap(), "frozen {{prd}}");
+        assert_eq!(template(p, "triage").unwrap(), PROMPT_TEMPLATES[4].1);
+        assert!(template(p, "nope").is_err());
     }
 
     #[test]
