@@ -2,7 +2,7 @@
 
 # HD EGM Workflow
 
-A local macOS app for cross-model PRD review: Claude writes the PRD, GPT reviews it with zero context, and I decide what goes back to Claude.
+Finds the gaps in a PRD that its author can't see, by having a zero-context GPT review what Claude wrote.
 
 ## Demo
 
