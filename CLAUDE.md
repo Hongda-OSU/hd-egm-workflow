@@ -12,9 +12,9 @@ section before implementing a feature; do not invent fields or flows.
 
 - Tauri 2 + Rust backend; Svelte 5 + Vite + TypeScript frontend
 - Package manager: **pnpm** (not npm, not yarn)
-- Rust 2024 workspace: `crates/egm-core` (logic, shared with the future
-  Tauri app) + `crates/egm-cli` (binary `egm`, used until M4)
-- Crates: `tokio`, `reqwest` (rustls), `serde`; `similar` comes with M5
+- Rust 2024 workspace: `crates/egm-core` (logic, shared by the Tauri app
+  in `src-tauri`) + `crates/egm-cli` (binary `egm`, for debugging)
+- Crates: `tokio`, `reqwest` (rustls), `serde`, `similar` (snapshot diffs)
 - No Python, no Electron, no database, no cloud, no API keys
 - Goldfish = `codex exec` (ChatGPT login); triager = `claude -p` (subscription)
 - Settings: `~/Library/Application Support/hd-egm-workflow/settings.json`
@@ -46,14 +46,15 @@ section before implementing a feature; do not invent fields or flows.
   sandbox; prompt + PRD go in via stdin. Do not weaken this isolation.
 - Strip the PRD's "关键决策清单" section before goldfish see it; only the
   triager gets it.
-- Run data lives in `~/hd-egm-runs/<prd-slug>/round-<N>/`; never overwrite
-  an earlier round's files.
+- Run data lives in `~/hd-egm-runs/<prd-slug>/round-<N>/` for the first
+  review and `<prd-slug>/review-<K>/round-<N>/` for re-review K≥2; never
+  overwrite an earlier round's files. Only the last round of the current
+  review is decidable, and rejections never carry across reviews.
 - Output schemas live in `schemas/` (one per goldfish, passed to
   `--output-schema`); prompt templates live in `prompts/`. Keep field names
   identical to the spec's data model (§7).
 - The Notion token lives in the macOS keychain only — never in files, logs,
   or test fixtures.
-- Milestone gate: no UI work (M4+) until M3 produces a useful `triage.json`.
 - Ask before adding a new dependency.
 
 ## Gotchas
