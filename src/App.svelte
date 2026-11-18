@@ -148,8 +148,18 @@
   const triage = $derived(round?.triage ?? null);
   const decisionOf = (id: string): Advice | null =>
     round?.decisions.find((d) => d.issue_id === id)?.decision ?? null;
+  // Order only by things a decision cannot change (auto-rejected last, then
+  // severity), so the list never reshuffles while the user works through it.
+  const SEVERITY_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+  const rank = (i: Issue) => (i.rejected_as ? 3 : 0) + (SEVERITY_RANK[i.severity] ?? 2) / 10;
   const shown = $derived(
-    triage ? triage.issues.filter((i) => src === "all" || i.source === src || i.also_from.includes(src)) : [],
+    triage
+      ? triage.issues
+          .filter((i) => src === "all" || i.source === src || i.also_from.includes(src))
+          .map((i, n) => ({ i, n }))
+          .sort((a, b) => rank(a.i) - rank(b.i) || a.n - b.n)
+          .map(({ i }) => i)
+      : [],
   );
   const cur = $derived(triage?.issues.find((i) => i.id === issueId) ?? shown[0] ?? null);
   const undecided = $derived(
@@ -410,7 +420,8 @@
       await loadDetail(true);
       issueId = id;
       if (advance) {
-        const next = shown.slice(at + 1).find((i) => !i.rejected_as && decisionOf(i.id) === null);
+        const open = (i: Issue) => !i.rejected_as && decisionOf(i.id) === null;
+        const next = shown.slice(at + 1).find(open) ?? shown.slice(0, at).find(open);
         if (next) issueId = next.id;
       } else if (d === "reject") {
         await tick();
