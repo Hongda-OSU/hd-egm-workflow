@@ -1,4 +1,4 @@
-//! HD EGM Workflow desktop shell (M4). Every command is a thin wrapper over
+//! HD EGM Workflow desktop shell. Every command is a thin wrapper over
 //! egm-core; the app never writes to Notion.
 
 use std::collections::BTreeMap;

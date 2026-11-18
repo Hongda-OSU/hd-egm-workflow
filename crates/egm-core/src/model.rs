@@ -1,4 +1,4 @@
-//! Typed shapes of goldfish and triager output (PRD §7.3, §7.6). Parsing into
+//! Typed shapes of goldfish and triager output (PRD §7.3, §7.7). Parsing into
 //! these with `deny_unknown_fields` is the schema check on our side.
 
 use serde::{Deserialize, Serialize};

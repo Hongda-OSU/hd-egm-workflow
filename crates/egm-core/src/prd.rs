@@ -1,4 +1,4 @@
-//! PRD-specific block handling: splitting off the key-decision list (PRD §7.5).
+//! PRD-specific block handling: splitting off the key-decision list (PRD §7.6).
 
 use serde::Serialize;
 
