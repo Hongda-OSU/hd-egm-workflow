@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use egm_core::model::{Advice, Decision, Triage};
 use egm_core::notion::{compact_id, Notion};
 use egm_core::review::{self, RoundVerdicts};
-use egm_core::settings::Settings;
+use egm_core::settings::{self as cfg, CliVersions, Models, Settings};
 use egm_core::store::{self, Lock, PrdStatus, Stage, Step};
 use serde::Serialize;
 use serde_json::Value;
@@ -34,13 +34,24 @@ struct AppStatus {
     /// The goldfish's dedicated CODEX_HOME, so the UI can show the exact
     /// login command when `codex` is false.
     codex_home: Option<String>,
+    /// Installed CLI versions (None when the CLI is missing) and the ones
+    /// the isolation probes passed on; a mismatch blocks runs (PRD §5).
+    codex_version: Option<String>,
+    claude_version: Option<String>,
+    verified: CliVersions,
+}
+
+fn cli_version(bin: &str) -> Option<String> {
+    let out = Command::new(bin).arg("--version").output().ok()?;
+    cfg::parse_version(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// Preflight for a round. Only exit codes / the `loggedIn` flag are read; no
 /// account details leave this function.
 #[tauri::command]
 async fn app_status() -> AppStatus {
-    let home = settings().ok().map(|s| s.codex_home());
+    let loaded = settings().ok();
+    let home = loaded.as_ref().map(|s| s.codex_home());
     let codex = home.as_ref().is_some_and(|h| {
         Command::new("codex")
             .env("CODEX_HOME", h)
@@ -60,6 +71,9 @@ async fn app_status() -> AppStatus {
         codex,
         claude,
         codex_home: home.map(|h| h.display().to_string()),
+        codex_version: cli_version("codex"),
+        claude_version: cli_version("claude"),
+        verified: loaded.map(|s| s.verified_cli_versions).unwrap_or_default(),
     }
 }
 
@@ -308,6 +322,52 @@ async fn open_notion(page_id: String) -> CmdResult<()> {
     Ok(())
 }
 
+/// Shows a path with the home folder as `~`, as settings.json writes it.
+fn tilde(p: &Path) -> String {
+    match p.strip_prefix(cfg::home()) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => p.display().to_string(),
+    }
+}
+
+#[derive(Serialize)]
+struct SettingsView {
+    models: Models,
+    defaults: Models,
+    data_dir: String,
+    settings_path: String,
+}
+
+#[tauri::command]
+async fn get_settings() -> CmdResult<SettingsView> {
+    let s = settings()?;
+    Ok(SettingsView {
+        models: s.models(),
+        defaults: Models::default(),
+        data_dir: tilde(&s.data_dir()),
+        settings_path: tilde(&cfg::settings_path()),
+    })
+}
+
+/// Saves only the model fields; they take effect from the next round.
+#[tauri::command]
+async fn save_models(models: Models) -> CmdResult<()> {
+    cfg::save_models(&models).map_err(err)
+}
+
+/// Reveals the data folder or settings.json in Finder. Takes a name, not a
+/// path, so the UI cannot point Finder anywhere else.
+#[tauri::command]
+async fn reveal(which: String) -> CmdResult<()> {
+    let path = match which.as_str() {
+        "data" => settings()?.data_dir(),
+        "settings" => cfg::settings_path(),
+        other => return Err(format!("unknown location {other}")),
+    };
+    Command::new("/usr/bin/open").arg("-R").arg(path).spawn().map_err(err)?;
+    Ok(())
+}
+
 fn main() {
     if let Ok(s) = Settings::load() {
         // A crash or quit mid-round must not block the PRD forever (PRD §6.3).
@@ -325,7 +385,10 @@ fn main() {
             make_handoff,
             copy_handoff,
             copy_text,
-            open_notion
+            open_notion,
+            get_settings,
+            save_models,
+            reveal
         ])
         .run(tauri::generate_context!())
         .expect("error while running HD EGM Workflow");

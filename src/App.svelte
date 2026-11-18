@@ -7,11 +7,13 @@
     type Advice,
     type AppStatus,
     type Issue,
+    type Models,
     type PrdDetail,
     type PrdItem,
     type PrdList,
     type Role,
     type RuleItem,
+    type SettingsView,
     type Step,
     type Verdict,
   } from "./lib/api";
@@ -88,6 +90,14 @@
 
   // Preflight: what a round needs. Nothing is shown while everything passes.
   type Problem = { text: string; cmd: string | null };
+  const versionRows = $derived(
+    status
+      ? [
+          { name: "codex", have: status.codex_version, want: status.verified.codex },
+          { name: "claude", have: status.claude_version, want: status.verified.claude },
+        ]
+      : [],
+  );
   const problems = $derived.by((): Problem[] => {
     if (!status) return [];
     const out: Problem[] = [];
@@ -99,6 +109,12 @@
         : { text: "读不到 app 的设置文件，GPT 金鱼没法启动。", cmd: null });
     if (!status.claude)
       out.push({ text: "Claude 整理员没登录，整理那一步跑不了。在终端运行", cmd: "claude auth login" });
+    for (const v of versionRows)
+      if (v.have && v.have !== v.want)
+        out.push({
+          text: `${v.name} 现在是 ${v.have}，隔离只在 ${v.want} 上测过。先按 agent_docs/ 重测，通过后把 settings.json 的 verified_cli_versions 改成新版本，再点右边重新检查。`,
+          cmd: null,
+        });
     return out;
   });
   const blocked = $derived(problems.length > 0);
@@ -207,6 +223,50 @@
       }
     });
     return saving;
+  }
+
+  // Settings dialog: only the model fields are editable; they take effect
+  // from the next round.
+  const EFFORTS = ["low", "medium", "high"];
+  const MODEL_KEYS = ["goldfish_model", "goldfish_effort", "triager_model"] as const;
+  let settingsView = $state<SettingsView | null>(null);
+  let settingsOpen = $state(false);
+  let draft = $state<Models>({ goldfish_model: "", goldfish_effort: "", triager_model: "" });
+  let savingModels = $state(false);
+  let firstField = $state<HTMLInputElement | null>(null);
+  const dirty = $derived(!!settingsView && MODEL_KEYS.some((k) => draft[k].trim() !== settingsView!.models[k]));
+  const effortOptions = $derived(
+    EFFORTS.includes(draft.goldfish_effort) ? EFFORTS : [...EFFORTS, draft.goldfish_effort],
+  );
+
+  async function openSettings() {
+    try {
+      settingsView = await api.getSettings();
+      draft = { ...settingsView.models };
+      settingsOpen = true;
+      await tick();
+      firstField?.focus();
+    } catch (e) {
+      flash(String(e), true);
+    }
+  }
+
+  async function saveSettings() {
+    if (!dirty || savingModels) return;
+    savingModels = true;
+    try {
+      await api.saveModels({
+        goldfish_model: draft.goldfish_model.trim(),
+        goldfish_effort: draft.goldfish_effort.trim(),
+        triager_model: draft.triager_model.trim(),
+      });
+      settingsOpen = false;
+      flash("模型已保存，从下一轮开始生效");
+    } catch (e) {
+      flash(String(e), true);
+    } finally {
+      savingModels = false;
+    }
   }
 
   function flash(text: string, error = false) {
@@ -506,6 +566,12 @@
       <span class="name">hd-egm-workflow</span>
       <span class="muted">Claude 写 PRD，GPT 零上下文审稿</span>
     </div>
+    <button type="button" class="icon-btn" onclick={openSettings} title="设置" aria-label="设置">
+      <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+        <circle cx="8" cy="8" r="2.2" />
+        <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" />
+      </svg>
+    </button>
   </header>
 
   {#if blocked}
@@ -516,6 +582,106 @@
         {/each}
       </div>
       <button type="button" class="recheck" disabled={checking} onclick={checkStatus}>{checking ? "检查中…" : "重新检查"}</button>
+    </div>
+  {/if}
+
+  {#snippet backToDefault(key: keyof Models)}
+    {@const d = settingsView?.defaults[key] ?? ""}
+    {#if draft[key].trim() !== d}
+      · <span class="changed-text">缺省是 {d}</span> ·
+      <button type="button" class="link-btn" onclick={() => (draft[key] = d)}>恢复缺省</button>
+    {/if}
+  {/snippet}
+
+  {#if settingsOpen && settingsView}
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+    <div class="backdrop" onclick={(e) => e.target === e.currentTarget && (settingsOpen = false)}
+      onkeydown={(e) => e.key === "Escape" && (settingsOpen = false)}>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div class="dialog-head">
+          <h2 id="settings-title">设置</h2>
+          <button type="button" class="icon-btn" onclick={() => (settingsOpen = false)} aria-label="关闭">✕</button>
+        </div>
+
+        <section class="dialog-sec">
+          <div class="label">模型</div>
+          <div class="field">
+            <label for="goldfish-model">金鱼模型</label>
+            <div>
+              <input id="goldfish-model" class="text-in" class:changed={draft.goldfish_model.trim() !== settingsView.defaults.goldfish_model}
+                bind:this={firstField} bind:value={draft.goldfish_model} spellcheck="false" autocomplete="off" />
+              <div class="hint">4 条金鱼共用这一个模型 {@render backToDefault("goldfish_model")}</div>
+            </div>
+          </div>
+          <div class="field">
+            <span class="field-label" id="effort-label">金鱼推理强度</span>
+            <div>
+              <div class="seg" role="radiogroup" aria-labelledby="effort-label">
+                {#each effortOptions as o (o)}
+                  <button type="button" role="radio" aria-checked={draft.goldfish_effort === o} class:on={draft.goldfish_effort === o}
+                    onclick={() => (draft.goldfish_effort = o)}>{o}</button>
+                {/each}
+              </div>
+              {#if draft.goldfish_effort !== settingsView.defaults.goldfish_effort}
+                <div class="hint">{@render backToDefault("goldfish_effort")}</div>
+              {/if}
+            </div>
+          </div>
+          <div class="field">
+            <label for="triager-model">整理员模型</label>
+            <div>
+              <input id="triager-model" class="text-in" class:changed={draft.triager_model.trim() !== settingsView.defaults.triager_model}
+                bind:value={draft.triager_model} spellcheck="false" autocomplete="off" />
+              {#if draft.triager_model.trim() !== settingsView.defaults.triager_model}
+                <div class="hint">{@render backToDefault("triager_model")}</div>
+              {/if}
+            </div>
+          </div>
+          {#if dirty}
+            <p class="model-warn">换了模型，从下一轮开始生效。之前测过的隔离不一定还成立，建议按 agent_docs/ 重测一次；新一轮的结果也跟之前几轮不能直接比。</p>
+          {:else}
+            <p class="muted small-text model-note">从下一轮开始生效，已经跑完的轮次不受影响。</p>
+          {/if}
+        </section>
+
+        <section class="dialog-sec">
+          <div class="label">命令行工具 <span class="label-note">只读，启动时自动检查</span></div>
+          {#each versionRows as v (v.name)}
+            <div class="ver-row">
+              <span>{v.name}</span>
+              <span class="mono">{v.have ?? "—"}</span>
+              {#if !v.have}
+                <span class="bad-text">没找到这个命令</span>
+              {:else if v.have === v.want}
+                <span class="ok-text">✓ 跟隔离实测的版本一致</span>
+              {:else}
+                <span class="bad-text">实测的是 {v.want}，要先按 agent_docs/ 重测</span>
+              {/if}
+            </div>
+          {:else}
+            <p class="muted small-text">还在检查…</p>
+          {/each}
+        </section>
+
+        <section class="dialog-sec">
+          <div class="label">文件 <span class="label-note">只读</span></div>
+          <div class="file-row">
+            <span>运行数据</span><span class="mono ellipsis" title={settingsView.data_dir}>{settingsView.data_dir}</span>
+            <button type="button" class="link-btn" onclick={() => api.reveal("data").catch((e) => flash(String(e), true))}>在 Finder 中显示</button>
+          </div>
+          <div class="file-row">
+            <span>设置文件</span><span class="mono ellipsis" title={settingsView.settings_path}>{settingsView.settings_path}</span>
+            <button type="button" class="link-btn" onclick={() => api.reveal("settings").catch((e) => flash(String(e), true))}>在 Finder 中显示</button>
+          </div>
+        </section>
+
+        <div class="dialog-foot">
+          <button type="button" class="secondary" onclick={() => (settingsOpen = false)}>取消</button>
+          <button type="button" class="secondary strong" disabled={!dirty || savingModels} onclick={saveSettings}>
+            {savingModels ? "保存中…" : "保存"}
+          </button>
+        </div>
+      </div>
     </div>
   {/if}
 
@@ -1167,4 +1333,33 @@
   .spec-pass { margin-top: 8px; }
   .spec-pass summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #2b3240; }
   .spec-pass .spec-line { margin-top: 6px; }
+  .backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 16px; background: rgba(31,35,40,.28); }
+  .dialog { width: min(540px, 100%); max-height: calc(100vh - 32px); overflow-y: auto; background: #fff; border-radius: 12px; box-shadow: 0 18px 50px rgba(0,0,0,.22); }
+  .dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px 10px 20px; }
+  .dialog-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .dialog-sec { padding: 14px 20px 8px; border-top: 1px solid rgba(0,0,0,.08); }
+  .label-note { font-weight: 400; color: #8a8f96; margin-left: 6px; }
+  .field { display: grid; grid-template-columns: 110px 1fr; align-items: start; gap: 12px; padding: 6px 0; }
+  .field > label, .field-label { padding-top: 7px; color: #2b3240; }
+  .text-in { width: 100%; height: 32px; box-sizing: border-box; padding: 0 10px; border: 1px solid rgba(0,0,0,.14); border-radius: 7px; background: #fff; color: #1f2328; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  .text-in:focus { outline: none; border-color: #4a5a7a; }
+  .text-in.changed { border-color: #b85414; }
+  .hint { margin-top: 4px; font-size: 11px; line-height: 1.5; color: #5f6670; }
+  .changed-text { color: #b85414; }
+  .link-btn { padding: 0; background: none; border: none; color: #4a5a7a; cursor: pointer; font: inherit; font-size: 12px; }
+  .hint .link-btn { font-size: 11px; }
+  .link-btn:hover { text-decoration: underline; }
+  .seg { display: inline-flex; width: 240px; padding: 3px; gap: 2px; box-sizing: border-box; background: #ecebe5; border-radius: 7px; }
+  .seg button { flex: 1; height: 26px; padding: 0; background: none; border: none; border-radius: 5px; color: #5f6670; cursor: pointer; font-size: 12px; }
+  .seg button.on { background: #fff; color: #1f2328; font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+  .model-warn { margin: 6px 0 8px; padding: 9px 12px; border-radius: 7px; background: #fbefe6; color: #8a3f0e; font-size: 12px; line-height: 1.55; }
+  .model-note { margin: 4px 0 8px; }
+  .ver-row { display: grid; grid-template-columns: 110px 90px 1fr; gap: 12px; align-items: center; min-height: 30px; }
+  .file-row { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 30px; }
+  .ver-row > span:first-child, .file-row > span:first-child { color: #2b3240; }
+  .ver-row .mono { font-size: 12px; }
+  .file-row .mono { font-size: 11px; color: #5f6670; }
+  .ok-text { color: #1f7a4d; font-size: 12px; }
+  .bad-text { color: #b3362b; font-size: 12px; }
+  .dialog-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px 16px; border-top: 1px solid rgba(0,0,0,.08); }
 </style>

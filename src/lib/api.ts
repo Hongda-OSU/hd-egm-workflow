@@ -99,6 +99,22 @@ export interface AppStatus {
   codex: boolean;
   claude: boolean;
   codex_home: string | null;
+  codex_version: string | null;
+  claude_version: string | null;
+  verified: { codex: string; claude: string };
+}
+
+export interface Models {
+  goldfish_model: string;
+  goldfish_effort: string;
+  triager_model: string;
+}
+
+export interface SettingsView {
+  models: Models;
+  defaults: Models;
+  data_dir: string;
+  settings_path: string;
 }
 
 export const api = {
@@ -114,6 +130,9 @@ export const api = {
   copyHandoff: (pageId: string, round: number) => invoke<void>("copy_handoff", { pageId, round }),
   copyText: (text: string) => invoke<void>("copy_text", { text }),
   openNotion: (pageId: string) => invoke<void>("open_notion", { pageId }),
+  getSettings: () => invoke<SettingsView>("get_settings"),
+  saveModels: (models: Models) => invoke<void>("save_models", { models }),
+  reveal: (which: "data" | "settings") => invoke<void>("reveal", { which }),
 };
 
 export function onProgress(cb: (p: { page_id: string; line: string }) => void): Promise<UnlistenFn> {
