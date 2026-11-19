@@ -4,6 +4,8 @@
 
 Finds the gaps in a PRD that its author can't see, by having a zero-context GPT review what Claude wrote.
 
+![Hand-drawn sketch of the idea: I give context to Claude (the elephant), which writes PRDs in Notion following my rule pages. The app fetches each PRD into a local list; GPT (the goldfish) reads it with only its own rules, claude -p contests the goldfish's findings, and the result is fed back to the elephant.](assets/idea-sketch.png)
+
 ## Demo
 
 I ran the app on its own PRD. It took seven rounds to reach GO, and the first round did not finish. Of the 62 issues the reviewers raised, I accepted 46.
