@@ -677,6 +677,13 @@
     tick().then(() => document.querySelector(".tab.on")?.scrollIntoView({ block: "nearest", inline: "nearest" }));
   });
 
+  // Deciding an issue moves on to the next open one, which may be outside
+  // the scrolled issue list (or back at its top); keep the selection in view.
+  $effect(() => {
+    void cur?.id;
+    tick().then(() => document.querySelector(".issues .issue.on")?.scrollIntoView({ block: "nearest" }));
+  });
+
   onMount(() => {
     const unlisten = onProgress((p) => {
       if (p.page_id !== running) return;
