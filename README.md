@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/f1630e7d-4cb9-43dd-bc32-1674b24c3bb9
+
 <img src="src-tauri/icons/128x128@2x.png" width="128" height="128" alt="HD EGM Workflow icon: a smiling pixel-art grey elephant with a small orange goldfish">
 
 # HD EGM Workflow
