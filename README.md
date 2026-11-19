@@ -6,6 +6,8 @@ Finds the gaps in a PRD that its author can't see, by having a zero-context GPT 
 
 ![Hand-drawn sketch of the idea: I give context to Claude (the elephant), which writes PRDs in Notion following my rule pages. The app fetches each PRD into a local list; GPT (the goldfish) reads it with only its own rules, claude -p contests the goldfish's findings, and the result is fed back to the elephant.](assets/idea-sketch.png)
 
+The idea, written up before I built it: [Letting two AIs pick at each other: my take on Google's EGM](https://juejin.cn/post/7701587858104533026) (in Chinese).
+
 ## Demo
 
 https://github.com/user-attachments/assets/f1630e7d-4cb9-43dd-bc32-1674b24c3bb9
