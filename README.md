@@ -1,7 +1,3 @@
-
-
-https://github.com/user-attachments/assets/f1630e7d-4cb9-43dd-bc32-1674b24c3bb9
-
 <img src="src-tauri/icons/128x128@2x.png" width="128" height="128" alt="HD EGM Workflow icon: a smiling pixel-art grey elephant with a small orange goldfish">
 
 # HD EGM Workflow
@@ -12,7 +8,9 @@ Finds the gaps in a PRD that its author can't see, by having a zero-context GPT 
 
 ## Demo
 
-I ran the app on its own PRD. It took seven rounds to reach GO, and the first round did not finish. Of the 62 issues the reviewers raised, I accepted 46.
+https://github.com/user-attachments/assets/f1630e7d-4cb9-43dd-bc32-1674b24c3bb9
+
+The video runs three rounds on another PRD, then shows where this one ended up. I ran the app on its own PRD. It took seven rounds to reach GO, and the first round did not finish. Of the 62 issues the reviewers raised, I accepted 46.
 
 | Round | Issues (high) | Key decisions hit | Verdict |
 |---|---|---|---|
